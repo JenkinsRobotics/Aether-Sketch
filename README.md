@@ -14,7 +14,7 @@
 <p align="center">Drawing and sketching — clean vector paths today, expressive brushes next.</p>
 
 <p align="center">
-  <img alt="Alpha 0.1" src="https://img.shields.io/badge/release-Alpha%200.1-d29922">
+  <a href="https://github.com/JenkinsRobotics/Aether-Sketch/releases/tag/v0.1.0-alpha.1"><img alt="Alpha 0.1" src="https://img.shields.io/badge/release-v0.1.0--alpha.1-d29922"></a>
   <img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-58a6ff">
   <a href="https://jenkinsrobotics.github.io/Aether-Sketch/"><img alt="Website" src="https://img.shields.io/badge/site-Aether--Sketch-1f6feb"></a>
 </p>
@@ -34,6 +34,7 @@ Sketch concepts, markups and visual ideas with a fast vector canvas: pens, shape
 - ✅ **Layers and groups** — Nested layers and groups, multi-path transforms and snapping.
 - ✅ **Path operations** — Trim, offset contours, Booleans and compound shapes with holes.
 - ✅ **Open files** — Local save and reopen, an SVG import subset and SVG export; full undo.
+- ✅ **Model Studio interface** — The shared Aether interface: a transparent document header, floating resizable side cards, a separate tool tray, saved layouts and themes — the same in every app.
 
 ### In progress
 
