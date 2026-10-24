@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "source_branch": "alpha-0.1",
+  "packages": [
+    {
+      "path": "vendor/aether-assets-0.2.0-alpha.28.tgz",
+      "sha256": "62b0ff5b53fc49a876021ae7a58658cc67b6c26b77d43c15a7a90c21b01fdf90",
+      "bytes": 125176681,
+      "url": null
+    },
+    {
+      "path": "vendor/aether-session-0.2.0-alpha.189.tgz",
+      "sha256": "9b59883c9470fd1a32006002e399983d08c422d9a8cfb2c30f3318051e883071",
+      "bytes": 36861,
+      "url": null
+    },
+    {
+      "path": "vendor/aether-sketch-0.2.0-alpha.4.tgz",
+      "sha256": "415e31e86ec14315f010727510eaa8b0f980ce3a235c4f15722104542fd7f32e",
+      "bytes": 24384,
+      "url": "https://github.com/JenkinsRobotics/Aether-Sketch/releases/download/v0.1.0-alpha.1/415e31e86ec1-aether-sketch-0.2.0-alpha.4.tgz"
+    },
+    {
+      "path": "vendor/aether-ui-0.2.0-alpha.172.tgz",
+      "sha256": "44d2a9e303c8fb0d31c15bca2933afd9087af5bc8d11cfd8fc2c3501887ed6e5",
+      "bytes": 462727,
+      "url": null
+    }
+  ]
+}
