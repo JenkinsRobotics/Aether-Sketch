@@ -53,7 +53,7 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit }: {
       const id = ids.at(-1), owner = id && locate(id); if (!id || !owner) return; setTreeSelection(id);
       const paths = ids.flatMap(id => owner.paths.some(p => p.id === id) ? [id] : groupPaths(owner, id).map(p => p.id)); onSelect(owner.id, paths);
     }}
-    renamingID={renaming} onRename={(id, value) => command(id, 'rename', value)} onCancelRename={() => setRenaming(null)} onAction={command}
+    renamingID={renaming} onRename={(id, value) => command(id, 'rename', value)} onCancelRename={() => setRenaming(null)} onAction={(id, action) => command(id, action)}
     onMove={(source, target, position) => commit(d => moveTreeItem(d, source, target, position))}
     menuItems={id => [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' }, { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
     onCommand={command} controls={[

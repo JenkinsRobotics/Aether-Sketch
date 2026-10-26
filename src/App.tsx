@@ -1,3 +1,4 @@
+import { SketchHistoryPanel } from "./SketchHistoryPanel";
 import { useAgentInteraction } from './useAgentInteraction';
 import { useContextCommands } from '@aether/ui';
 import { useStudioApplications } from "@aether/session/applications";
@@ -12,7 +13,7 @@ import { TextInspector } from './TextInspector';
 import { importSVG } from './svg-import';
 import { saveRecovery, type Recovery } from './recovery';
 import { useEffect, useRef, useState } from 'react';
-import { AetherIcon, ToolIcon, StudioWorkspace as WorkspaceShell, WorkspaceSwitcher, WorkspaceFileBar, standardWorkspacePanels, WorkspaceRibbon, StudioDocumentBar as DocumentBar,
+import { AetherIcon, ToolIcon, StudioWorkspace as WorkspaceShell, WorkspaceSwitcher, WorkspaceFileBar, standardAuxiliaryPanels, standardWorkspacePanels, WorkspaceRibbon, StudioDocumentBar as DocumentBar,
   Slider, StudioModeButton, WorkspaceWindowMenu, MenuButton, type ToolIconName } from '@aether/ui';
 import { SketchCanvas, type EditorTool } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
@@ -160,10 +161,10 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           { id: 'delete', label: 'Delete path', icon: <AetherIcon name="delete" />, disabled: disabled || !chosen.length },
         ] },
       ] }]} onCommand={editCommand} />} style={{ flex: 1, minHeight: 0 }} defaultOpenLeft={['layers']} defaultOpenRight={['properties']}
-      leftPanels={standardWorkspacePanels([{ id: 'layers', title: 'Layers', icon: <AetherIcon name="layers" />, collection: true, content: <LayersPanel doc={doc} layer={layer} selected={selected}
+      leftPanels={standardAuxiliaryPanels(standardWorkspacePanels([{ id: 'layers', title: 'Layers', icon: <AetherIcon name="layers" />, collection: true, content: <LayersPanel doc={doc} layer={layer} selected={selected}
         onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> },
       {id:'advisor',title:'AI advisor',icon:null,content:<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>},
-      ], { features: "layers" }, documentConnection).filter(panel=>panel.id!=="part-manager")}
+      ], { features: "layers" }, documentConnection, { historyTabStorageKey: "aether-sketch.history-tab", history: <SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/> }))}
       rightPanels={[{ id: 'properties', title: 'Properties', icon: <AetherIcon name="sliders" />, content: <div className="sketch-properties">
         <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<strong>{tools.find(t => t.id === tool)?.label}</strong>
           <VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
