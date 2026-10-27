@@ -1,3 +1,4 @@
+import { SaveRecoveryPanel } from '@aether/session/SaveRecoveryPanel';
 import { SketchHistoryPanel } from "./SketchHistoryPanel";
 import { useAgentInteraction } from './useAgentInteraction';
 import { useContextCommands } from '@aether/ui';
@@ -145,6 +146,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       } catch (error) { setNotice(error instanceof Error ? error.message : 'Unable to open drawing.'); }
       input.value = '';
     }} />
+    <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
     <WorkspaceShell workspaceControls={<WorkspaceSwitcher workspaces={[{id:"vector",label:"Vector"}]} workspaceID="vector" onSelect={()=>{}}/>} preset={preset} toolbarSpan="center" pinnedPanels={['layers']}
       bottom={<WorkspaceFileBar fileActions={fileActions} tabs={[{id:'drawing',label:name,dirty:location.pathname.startsWith('/sketch/')?persistence.state.phase!=='saved':serializeDocument(doc)!==saved,status:location.pathname.startsWith('/sketch/')?(persistence.state.phase==='saved'?'Saved':persistence.state.phase==='saving'||persistence.state.phase==='pending'?'Saving…':persistence.ready?'Not saved':'Opening…'):(recoveryStatus||'Unsaved draft'),statusTitle:persistence.state.message,icon:<AetherIcon name="file-sketch"/>}]} activeID="drawing" onSelect={()=>{}} onAdd={newDrawing} addLabel="Create new drawing" trailing={<span className="aui-workspace-file-status" role="status">{notice}</span>}
         manager={{connection:documentConnection,activeID:layer.id,documentGroups:[{id:"layers",label:"Layers",items:doc.layers.map(item=>({id:item.id,name:item.name,kind:"layer",detail:"Layer"}))}],onOpenItem:item=>{setInsideID(null);setLayerID(item.id);setSelected([]);setNode(null);}}}/>}
