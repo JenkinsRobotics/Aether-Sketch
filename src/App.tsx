@@ -15,13 +15,15 @@ import { TextInspector } from './TextInspector';
 import { importSVG } from './svg-import';
 import { saveRecovery, type Recovery } from './recovery';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { CommandSearch, FreeformCanvas, type FreeformCamera, type FreeformCanvasController, type FreeformChange, type FreeformItem, type FreeformPoint, type WorkspacePanelState } from '@aether/ui';
+import { DriveBrowser, DocumentTabBrowser, FileIcon, StandardAppShell, FreeformCanvas, type FreeformCamera, type FreeformCanvasController, type FreeformChange, type FreeformItem, type FreeformPoint, type WorkspacePanelState } from '@aether/ui';
 import { pathBounds } from '@aether/sketch';
 import { alignPaths, distributePaths, flipPaths, orderPaths, rotatePaths, type AlignMode, type OrderMode } from './arrange';
 import { BoardInspector } from './BoardInspector';
+import { SelectionInspector } from './SelectionInspector';
+import { createDocument } from './create-document';
+import { driveRequest, editorURL, encodeFile, fileIcon, fileType, type DriveFile } from '@aether/session/library/drive-api';
 import { STICKY_COLORS } from './board';
-import { AetherIcon, ToolIcon, StudioWorkspace as WorkspaceShell, WorkspaceFileBar, standardAuxiliaryPanels, standardWorkspacePanels, WorkspaceRibbon, StudioDocumentBar as DocumentBar,
-  Slider, StudioModeButton, WorkspaceWindowMenu, MenuButton, type ToolIconName } from '@aether/ui';
+import { AetherIcon, ToolIcon, Slider, MenuButton, type ToolIconName } from '@aether/ui';
 import { SketchCanvas, type EditorTool } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
@@ -54,9 +56,9 @@ const isBoardTool = (tool: AppTool): tool is BoardTool => tool in CANVAS_TOOL;
 const ALIGN: { id: AlignMode; label: string }[] = [{ id: 'left', label: 'Align left' }, { id: 'center', label: 'Align horizontal centres' }, { id: 'right', label: 'Align right' },
   { id: 'top', label: 'Align top' }, { id: 'middle', label: 'Align vertical centres' }, { id: 'bottom', label: 'Align bottom' }];
 const ORDER: { id: OrderMode; label: string }[] = [{ id: 'front', label: 'Bring to front' }, { id: 'forward', label: 'Bring forward' }, { id: 'backward', label: 'Send backward' }, { id: 'back', label: 'Send to back' }];
-const PANELS_KEY = 'aether-sketch.panels';
+const PANELS_KEY = 'aether-sketch.panels.v2';
 // A controlled layout ignores defaultOpenLeft/Right, so the first-run layout opens Layers and Properties here.
-const DEFAULT_PANELS: WorkspacePanelState = { layers: { placement: 'docked' }, properties: { placement: 'docked' } };
+const DEFAULT_PANELS: WorkspacePanelState = { tree: { placement: 'docked' }, properties: { placement: 'docked' } };
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const readDataURL = (file: File) => new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
 const imageSize = (src: string) => new Promise<{ width: number; height: number }>(resolve => { const i = new Image(); i.onload = () => resolve({ width: i.naturalWidth, height: i.naturalHeight }); i.onerror = () => resolve({ width: 240, height: 160 }); i.src = src; });
@@ -72,6 +74,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [agentMessages,setAgentMessages]=useState<AssistantMessage[]>([]);
   const [preset, setPreset] = useState<'docked' | 'floating' | 'canvas'>('floating'), [tool, setTool] = useState<AppTool>('select');
   const [camera, setCamera] = useState<FreeformCamera>({ x: 48, y: 48, zoom: 1 }), [boardSelection, setBoardSelection] = useState<string[]>([]);
+  const [boardGrid, setBoardGrid] = useState(true), [boardConnectors, setBoardConnectors] = useState(true);
   const [ribbonTab, setRibbonTab] = useState('draw'), canvasController = useRef<FreeformCanvasController>(null), imageFile = useRef<HTMLInputElement>(null);
   const [panelState, setPanelState] = useState<WorkspacePanelState>(() => { try { const v: unknown = JSON.parse(sessionStorage.getItem(PANELS_KEY) ?? '{}'); return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length ? v as WorkspacePanelState : DEFAULT_PANELS; } catch { return DEFAULT_PANELS; } });
   const [paint, setPaint] = useState<PaintStyle>(defaultPaint), [insideID, setInsideID] = useState<string | null>(null);
@@ -214,7 +217,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'save', label: 'Save drawing', category: 'File' }, { id: 'export', label: 'Export SVG', category: 'File' }, { id: 'export-png', label: 'Export PNG (2×)', category: 'File' },
     { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
   ];
-  const runCommand = (id: string) => { if (id === 'save') save(); else if (id === 'export') exportSVG(); else if (id === 'import') svgFile.current?.click(); else if (id === 'undo') undo(); else if (id === 'redo') redo(); else editCommand(id); };
+  const runCommand = (id: string) => { if (id === 'open') file.current?.click(); else if (id === 'save') save(); else if (id === 'export') exportSVG(); else if (id === 'import') svgFile.current?.click(); else if (id === 'undo') undo(); else if (id === 'redo') redo(); else editCommand(id); };
   const boardKeys = (e: KeyboardEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (e.defaultPrevented || target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
@@ -228,12 +231,19 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     else if (!mod && !e.altKey && key === 's') run('note'); else if (!mod && !e.altKey && key === 't') run('text');
   };
   useEffect(() => { const t = window.setTimeout(() => canvasController.current?.fit(), 0); return () => window.clearTimeout(t); }, [documentIdentity]);
-  return <div className="sketch-app aui-studio-app">
-    <DocumentBar defaultHeaderPins={["layout","tabs","theme","notifications","comments","apps","share"]}
-      search={<CommandSearch commands={searchCommands} onSelect={runCommand} registerShortcut />} application={{ apps: applications, id: "sketch", name: "Aether Sketch" }} documentName={`${name}.aethersketch`}
-      documentState={<span className="sketch-recovery-status" data-recovery-status="" role="status">{recoveryStatus}</span>}
-      trailing={<DraftRecovery scope={recoveryKey} onRestore={draft=>{void beginDocument().then(()=>{history.open(draft.doc);setName(draft.name);setLayerID(draft.doc.layers[0].id);setSelected([]);setInsideID(null);setContour(0);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));}}/>} viewControls={<><StudioModeButton preset={preset} onChange={setPreset} /><WorkspaceWindowMenu /></>} />
-
+  const saveState = (isLocalDocument() || isStudioHosted())
+    ? (persistence.state.phase === 'saved' ? 'Saved' : persistence.state.phase === 'saving' || persistence.state.phase === 'pending' ? 'Saving…' : persistence.ready ? 'Not saved' : 'Opening…')
+    : serializeDocument(doc) !== saved ? 'Unsaved changes' : '';
+  const drive = isStudioHosted()
+    ? <DriveBrowser documentID={persistence.file?.id ?? null} app="sketch" documentNoun="drawing" request={driveRequest} flush={persistence.flush}
+        describe={f => ({ icon: <FileIcon icon={fileIcon(f as DriveFile)} />, type: fileType(f as DriveFile) })} onOpen={f => { location.assign(editorURL(f as DriveFile)); }}
+        createItems={[{ id: 'sketch', label: 'New drawing…' }]} onCreate={async (_kind, drawingName, destination) => {
+          const created = createDocument(drawingName);
+          const file = await driveRequest<DriveFile>('create', { ...destination, app: 'sketch', kind: 'file', name: created.name, data_base64: await encodeFile(created) });
+          location.assign(editorURL(file));
+        }} />
+    : <p className="sketch-drive-note">Connect to Aether Studio to browse Drive.</p>;
+  return <>
     <input hidden ref={svgFile} type="file" accept=".svg,image/svg+xml" aria-label="Import SVG file" onChange={async e => {
       const input=e.currentTarget, f=input.files?.[0]; if(!f)return;
       try { const imported=importSVG(await f.text());
@@ -256,13 +266,15 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       if (files.length) { const at = { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom }; void attach(files, at); }
     }} />
     <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
-    <WorkspaceShell preset={preset} toolbarSpan={preset === 'docked' ? 'window' : 'center'} toolPosition={preset === 'docked' ? 'top' : 'bottom'} pinnedPanels={['layers']}
-      sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }} preservePanelContent
+    <StandardAppShell className="sketch-app" application={{ apps: applications, id: "sketch", name: "Aether Sketch" }} documentName={`${name}.aethersketch`}
+      documentMenu={fileActions}
+      documentState={<span className="sketch-recovery-status" data-recovery-status="" role="status">{[saveState, recoveryStatus, notice].filter(Boolean).join(' · ')}</span>}
+      headerTrailing={<DraftRecovery scope={recoveryKey} onRestore={draft=>{void beginDocument().then(()=>{history.open(draft.doc);setName(draft.name);setLayerID(draft.doc.layers[0].id);setSelected([]);setInsideID(null);setContour(0);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));}}/>}
+      commands={searchCommands} onCommand={runCommand} layout={preset} onLayoutChange={setPreset}
       panelState={panelState} onPanelStateChange={state => { setPanelState(state); try { sessionStorage.setItem(PANELS_KEY, JSON.stringify(state)); } catch { /* layout is a convenience */ } }}
-      bottom={<WorkspaceFileBar fileActions={fileActions} tabs={[{id:'drawing',label:name,dirty:(isLocalDocument()||isStudioHosted())?persistence.state.phase!=='saved':serializeDocument(doc)!==saved,status:(isLocalDocument()||isStudioHosted())?(persistence.state.phase==='saved'?'Saved':persistence.state.phase==='saving'||persistence.state.phase==='pending'?'Saving…':persistence.ready?'Not saved':'Opening…'):(recoveryStatus||'Unsaved draft'),statusTitle:persistence.state.message,icon:<AetherIcon name="file-sketch"/>}]} activeID="drawing" onSelect={()=>{}} onAdd={newDrawing} addLabel="Create new drawing" trailing={<span className="aui-workspace-file-status" role="status">{notice}</span>}
-        manager={{connection:documentConnection,activeID:layer.id,documentGroups:[{id:"layers",label:"Layers",items:doc.layers.map(item=>({id:item.id,name:item.name,kind:"layer",detail:"Layer"}))}],onOpenItem:item=>{setInsideID(null);setLayerID(item.id);setSelected([]);setNode(null);}}}/>}
- toolbar={<WorkspaceRibbon variant={preset === 'docked' ? 'docked' : 'floating'} appearance="glass" workspaceLayout="column"
-      workspaces={[{ id: 'vector', label: 'Vector', icon: <AetherIcon name="sketch" /> }]} workspaceID="vector" onWorkspaceSelect={() => {}} activeTabID={ribbonTab} onTabSelect={setRibbonTab} tabs={[
+      sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }}
+      toolbar={{ workspaces: [{ id: 'vector', label: 'Vector', icon: <AetherIcon name="sketch" /> }], workspaceID: 'vector', onWorkspaceSelect: () => {},
+        activeTabID: ribbonTab, onTabSelect: setRibbonTab, onCommand: editCommand, tabs: [
       { id: 'draw', label: 'Draw', groups: [
         { id: 'select', label: 'Select', tools: tools.slice(0, 2).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
         { id: 'draw', label: 'Draw', tools: tools.slice(2, 7).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
@@ -297,30 +309,40 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           { id: 'rotate-90', label: 'Rotate 90°', icon: <ToolIcon name="rotate" />, disabled: disabled || !chosen.length },
         ] },
       ] },
-    ]} onCommand={editCommand} />} style={{ flex: 1, minHeight: 0 }} defaultOpenLeft={['layers']} defaultOpenRight={['properties']}
-      leftPanels={standardAuxiliaryPanels(standardWorkspacePanels([{ id: 'layers', title: 'Layers', icon: <AetherIcon name="layers" />, collection: true, content: <LayersPanel doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
+    ] }}
+      tree={{ title: 'Layers', icon: <AetherIcon name="layers" />, content: <LayersPanel doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
         onDeleteBoard={ids => { changeBoard(board.filter(i => !ids.includes(i.id) && !(i.kind === 'connector' && (ids.includes(i.from ?? '') || ids.includes(i.to ?? ''))))); setBoardSelection([]); }}
-        onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> },
-      {id:'advisor',title:'AI advisor',icon:null,content:<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>},
-      ], { features: "layers" }, documentConnection, { historyTabStorageKey: "aether-sketch.history-tab", history: <SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/> }))}
-      rightPanels={[{ id: 'properties', title: 'Properties', icon: <AetherIcon name="sliders" />, content: <div className="sketch-properties">
-        {chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
+        onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> }}
+      advisor={<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>}
+      connection={documentConnection} historyTabStorageKey="aether-sketch.history-tab" history={<SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/>}
+      files={{ local: { label: 'This drawing', icon: <AetherIcon name="file-sketch" />, content: <DocumentTabBrowser title="Drawing contents" rootLabel={`${name}.aethersketch`} label="Drawing"
+          tabs={[{ id: 'drawing', label: name, detail: `Aether Sketch · ${doc.layers.length} layer${doc.layers.length === 1 ? '' : 's'}${board.length ? ` · ${board.length} board item${board.length === 1 ? '' : 's'}` : ''}`, icon: <AetherIcon name="file-sketch" />, current: true }]}
+          onAdd={newDrawing} onReorder={() => {}} onDetach={() => {}} /> }, drive, onFiles: files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom }) }}
+      objectTabs={{
+        inspector: <SelectionInspector paths={chosen} board={chosenBoard} layer={layer} />,
+        properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
           onDelete={() => { changeBoard(board.filter(i => !boardSelection.includes(i.id) && !(i.kind === 'connector' && (boardSelection.includes(i.from ?? '') || boardSelection.includes(i.to ?? ''))))); setBoardSelection([]); }} />}
         <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<strong>{tools.find(t => t.id === tool)?.label ?? boardTools.find(t => t.id === tool)?.label}</strong>
-          <VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
+          {tool === 'polygon' && <FieldRow label="Sides"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
+          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div></div>,
+        appearance: <div className="sketch-properties"><VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
             inside={!!insideID} onInside={() => { setInsideID(insideID ? null : chosen[0]?.id ?? null); chooseTool('paint'); }}
             onChange={patch => { setPaint(p => ({ ...p, ...patch })); setStyle(patch); }}
             canRelease={chosen.some(p => ancestors(layer, p.groupID).some(g => g.clipPathID))}
-            onRelease={() => { const ids = new Set(chosen.flatMap(p => ancestors(layer, p.groupID).filter(g => g.clipPathID).map(g => g.id))); changeLayer(l => ({ ...l, groups: l.groups?.map(g => ids.has(g.id) ? { ...g, clipPathID: undefined } : g) })); setInsideID(null); }} />
-          {tool === 'polygon' && <FieldRow label="Sides"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
-          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details>
-        </div>
-        <RegionInspector paths={chosen} disabled={disabled} onSplice={splice} onSelect={select} contour={contour} onContour={index=>{setContour(index);setNode(null);chooseTool('node');}} />
-        <VectorInspector contour={contour} paths={chosen} node={node} disabled={disabled} onReplace={replace} onSplice={splice} onAdd={add} onDuplicate={() => { const next = duplicatePaintSelection(layer, selected); changeLayer(() => next.layer); setSelected(next.selected); }} onSelect={select} snap={snap} onSnap={setSnap} />
-      </div> }]}
-    >
+            onRelease={() => { const ids = new Set(chosen.flatMap(p => ancestors(layer, p.groupID).filter(g => g.clipPathID).map(g => g.id))); changeLayer(l => ({ ...l, groups: l.groups?.map(g => ids.has(g.id) ? { ...g, clipPathID: undefined } : g) })); setInsideID(null); }} /></div>,
+        transform: <div className="sketch-properties"><VectorInspector contour={contour} paths={chosen} node={node} disabled={disabled} onReplace={replace} onSplice={splice} onAdd={add} onDuplicate={() => { const next = duplicatePaintSelection(layer, selected); changeLayer(() => next.layer); setSelected(next.selected); }} onSelect={select} snap={snap} onSnap={setSnap} /></div>,
+        effects: <div className="sketch-properties"><RegionInspector paths={chosen} disabled={disabled} onSplice={splice} onSelect={select} contour={contour} onContour={index=>{setContour(index);setNode(null);chooseTool('node');}} /></div>,
+      }}
+      centerTray={{ onAction: runCommand,
+        tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
+        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
+          { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, { id: 'export', label: 'Export SVG', icon: <AetherIcon name="export" /> }, { id: 'export-png', label: 'Export PNG (2×)', icon: <AetherIcon name="export" /> }] }}
+      environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
+        actions: [{ id: 'fit', label: 'Zoom to fit', icon: <AetherIcon name="fit" /> }, { id: 'zoom-100', label: 'Zoom to 100%', icon: <AetherIcon name="zoom-in" /> },
+          { id: 'grid', label: 'Dot grid', icon: <AetherIcon name="grid-dots" />, pressed: boardGrid }, { id: 'connectors', label: 'Show connectors', icon: <ToolIcon name="connector" />, pressed: boardConnectors },
+          { id: 'snap', label: 'Snapping', icon: <AetherIcon name="timeline-snap" />, pressed: snap.enabled }] }}>
       <div className="sketch-board" onKeyDown={boardKeys}>
-        <FreeformCanvas aria-label="Sketch board" items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
+        <FreeformCanvas aria-label="Sketch board" hud={false} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
           selection={boardSelection} onSelectionChange={selectBoard} onUndo={undo} onRedo={redo} tools={[]} controllerRef={canvasController}
           tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' ? 'select' : `vector:${tool}`} hostTools={HOST_TOOLS}
           onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom })}
@@ -329,7 +351,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add([path])} onSplice={splice}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>
-    </WorkspaceShell>
-
-  </div>;
+    </StandardAppShell>
+    <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
+  </>;
 }
