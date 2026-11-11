@@ -5,9 +5,11 @@ html, body, #root { height: 100%; margin: 0; }
 .sketch-tool-settings p { line-height: 1.65; color: var(--aether-color-text-dim); }
 .sketch-layout { display: flex; gap: 6px; align-items: center; }
 .sketch-layout select { background: var(--aether-color-bg-panel); color: inherit; border: 1px solid var(--aether-color-border); border-radius: 5px; padding: 4px; }
-.sketch-canvas-wrap { height: 100%; box-sizing: border-box; padding: 30px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--aether-color-bg-app); }
-.sketch-canvas { width: 100%; height: 100%; touch-action: none; user-select: none; outline: none; }
-.sketch-canvas:focus-visible { outline: 1px solid var(--aether-color-accent); }
+.sketch-board { height: 100%; min-height: 0; }
+/* The vector drawing is FreeformCanvas's world-space layer: one SVG unit per canvas pixel. */
+.sketch-canvas { position: absolute; left: 0; top: 0; overflow: visible; touch-action: none; user-select: none; outline: none; }
+.sketch-artboard { filter: drop-shadow(0 1px 3px rgb(0 0 0 / .18)); }
+.sketch-board-inspector { display: flex; flex-direction: column; gap: 8px; padding: 0 0 10px; margin-bottom: 8px; border-bottom: 1px solid var(--aether-color-border); }
 .sketch-selection, .sketch-draft { stroke: var(--aether-color-accent); stroke-width: 1.5; }
 .sketch-selection { stroke-dasharray: 5 3; }
 .sketch-nodes, .sketch-tangent { stroke: var(--aether-color-accent); fill: var(--aether-color-bg-panel); stroke-width: 1; }
@@ -19,9 +21,6 @@ html, body, #root { height: 100%; margin: 0; }
 .sketch-vector-inspector fieldset { display: flex; flex-direction: column; gap: 4px; min-width: 0; border: 0; border-top: 1px solid var(--aether-color-border); padding: 8px 0 0; margin: 6px 0 0; }
 .sketch-vector-inspector legend { padding: 0 8px 0 0; font-weight: 600; }
 .sketch-vector-inspector p { line-height: 1.5; color: var(--aether-color-text-dim); margin: 0; }
-.sketch-canvas-wrap { position: relative; }
-.sketch-view-controls { position: absolute; bottom: 10px; right: 20px; display: flex; align-items: center; gap: 8px; background: var(--aether-color-bg-panel); border: 1px solid var(--aether-color-border); border-radius: 10px; padding: 4px 8px; }
-.sketch-view-controls span { color: var(--aether-color-text-dim); font-size: 10px; }
 .sketch-marquee { fill: var(--aether-color-accent); fill-opacity: .08; stroke: var(--aether-color-accent); }
 .sketch-snap-guide { stroke: var(--aether-color-accent); fill: none; }
 .sketch-snap-guide text { stroke: none; fill: var(--aether-color-accent); }
@@ -50,9 +49,6 @@ html, body, #root { height: 100%; margin: 0; }
 
 .sketch-tool-help summary { cursor: pointer; padding-block: 6px; color: var(--aether-color-text-dim); }
 
-/* Fit the artboard within the shared chrome's measured center rectangle. */
-.aui-studio-app .sketch-canvas-wrap { padding: max(30px, var(--aui-workspace-inset-top, 0px)) max(30px, var(--aui-workspace-inset-right, 0px)) max(80px, var(--aui-studio-tools-clearance, 0px)) max(30px, var(--aui-workspace-inset-left, 0px)); }
-.aui-studio-app .sketch-view-controls { bottom: calc(var(--aui-studio-tools-clearance, 72px) + 10px); }
 
 .sketch-recovery-status { font-size: 11px; color: var(--aether-color-text-dim); white-space: nowrap; }
 @media (max-width: 900px) { .sketch-recovery-status { display: none; } }

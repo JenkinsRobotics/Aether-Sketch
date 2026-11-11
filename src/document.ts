@@ -1,9 +1,11 @@
 import type { VectorText } from './text';
+import { readBoard, type BoardItem } from './board';
 import { isVectorGradient, type VectorAppearance, type SketchPath } from '@aether/sketch';
 export interface DrawingPath extends SketchPath, VectorAppearance { text?: VectorText; fillOpen?: boolean; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
 export interface PathGroup { clipPathID?: string; id: string; name: string; parentID?: string; hidden?: boolean; locked?: boolean }
 export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[] }
-export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[] }
+/** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none. */
+export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[] }
 export function newLayer(name: string): Layer { return { id: crypto.randomUUID(), name, visible: true, locked: false, paths: [] }; }
 export function newDocument(): SketchDocument { return { format: 'aethersketch', version: 2, widthPx: 1200, heightPx: 800, layers: [newLayer('Layer 1')] }; }
 export const serializeDocument = (doc: SketchDocument) => JSON.stringify(doc, null, 2);
@@ -75,5 +77,6 @@ export function readDocument(text: string): SketchDocument {
       check(clip?.closed && !clip.text && clip.groupID === group.id);
     }
   }
-  return { ...doc, version: 2 };
+  const board = readBoard(doc.board, ids), { board: _raw, ...rest } = doc;
+  return { ...rest, version: 2, ...(board.length ? { board } : {}) };
 }

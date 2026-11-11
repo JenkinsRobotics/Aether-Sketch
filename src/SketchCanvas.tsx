@@ -4,7 +4,6 @@ import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } fr
 import type { ReactNode } from 'react';
 import { PaintDefinitions } from './PaintDefinitions';
 import { paintAttributes, clipPaths, paintIDs, type PaintStyle } from './paint';
-import { Button } from '@aether/ui';
 import { pathContours, replaceContour, beginDraft, moveDraft, endDraft, finishPen, penPointerDown, previewShape, pathData,
   replacePathPoints, transformPath, splitPathEdge, nearestPathEdge, movePathControl,
   pathBounds, boundsContain, resizePoint, resizeBounds, rotatePoint, handlePoint, RESIZE_HANDLES,
@@ -23,12 +22,11 @@ interface Props {
 }
 type Drag = { origin: Point; paths: DrawingPath[]; node?: number; control?: 'c1' | 'c2'; handle?: ResizeHandle | 'rotate'; bounds: Bounds; anchor: Point };
 export function SketchCanvas(props: Props) {
-  const svg = useRef<SVGSVGElement>(null), activePointer = useRef<number | null>(null), space = useRef(false);
+  const svg = useRef<SVGSVGElement>(null), activePointer = useRef<number | null>(null);
   const draftRef = useRef<Draft | null>(null), drag = useRef<Drag | null>(null);
-  const box = useRef<{ origin: Point; previous: string[] } | null>(null), pan = useRef<{ x: number; y: number; view: Bounds } | null>(null);
+  const box = useRef<{ origin: Point; previous: string[] } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null), [preview, setPreview] = useState<DrawingPath[]>([]);
   const [marquee, setMarquee] = useState<Bounds | null>(null), [guides, setGuides] = useState<SnapGuide[]>([]);
-  const [view, setView] = useState<Bounds>({ x: 0, y: 0, width: props.doc.widthPx, height: props.doc.heightPx });
   const updateDraft = (value: Draft | null) => { draftRef.current = value; setDraft(value); };
   const canEdit = !!props.layer?.visible && !props.layer.locked;
   const point = (e: { clientX: number; clientY: number }): Point => {
@@ -61,10 +59,10 @@ export function SketchCanvas(props: Props) {
     }
   };
   const down = (e: PointerEvent<SVGSVGElement>) => {
-    if ((e.button !== 0 && e.button !== 1) || !e.isPrimary || activePointer.current !== null) return;
+    // Panning (Space-drag, middle button) and zoom belong to the surrounding FreeformCanvas camera.
+    if (e.button !== 0 || !e.isPrimary || activePointer.current !== null) return;
     e.preventDefault(); e.currentTarget.focus();
     activePointer.current = e.pointerId; e.currentTarget.setPointerCapture(e.pointerId);
-    if (space.current || e.button === 1) { pan.current = { x: e.clientX, y: e.clientY, view }; return; }
     if (!canEdit) return;
     const at = point(e), target = e.target as SVGElement;
     if (props.tool === 'text') { const text=newText(snap(at,e.altKey)); props.onAdd(text);props.onSelect([text.id]);props.onTool('select');return; }
@@ -136,7 +134,6 @@ export function SketchCanvas(props: Props) {
   };
   const move = (e: PointerEvent<SVGSVGElement>) => {
     if (activePointer.current !== null && e.pointerId !== activePointer.current) return;
-    if (pan.current) { setView({ ...pan.current.view, x: pan.current.view.x - (e.clientX - pan.current.x) / scale(), y: pan.current.view.y - (e.clientY - pan.current.y) / scale() }); return; }
     const at = point(e);
     if (box.current) { const a = box.current.origin; setMarquee({ x: Math.min(a[0], at[0]), y: Math.min(a[1], at[1]), width: Math.abs(a[0] - at[0]), height: Math.abs(a[1] - at[1]) }); }
     else if (drag.current) setPreview(isDrag(drag.current, e) ? dragged(drag.current, e) : []);
@@ -147,8 +144,7 @@ export function SketchCanvas(props: Props) {
   };
   const up = (e: PointerEvent<SVGSVGElement>) => {
     if (activePointer.current !== e.pointerId) return;
-    if (pan.current) pan.current = null;
-    else if (box.current) {
+    if (box.current) {
       if (marquee) props.onSelect([...new Set([...box.current.previous, ...editable.filter(p => { const b = pathBounds([p]); return b && boundsContain(marquee, b); }).map(p => p.id)])]);
       box.current = null; setMarquee(null);
     } else if (drag.current) { if (isDrag(drag.current, e)) props.onReplace(dragged(drag.current, e)); drag.current = null; setPreview([]); }
@@ -158,15 +154,14 @@ export function SketchCanvas(props: Props) {
     }
     setGuides([]); activePointer.current = null; e.currentTarget.releasePointerCapture(e.pointerId);
   };
-  const cancel = () => { activePointer.current = null; drag.current = null; box.current = null; pan.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
+  const cancel = () => { activePointer.current = null; drag.current = null; box.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
   useEffect(() => { cancel(); }, [props.resetKey]);
   const key = (e: KeyboardEvent<SVGSVGElement>) => {
-    if (e.code === 'Space') { e.preventDefault(); space.current = true; return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); cancel(); e.shiftKey ? props.redo() : props.undo(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); props.onSelect(editable.map(p => p.id)); return; }
     if (e.key === 'Escape') { cancel(); return; }
     if (e.key === 'Enter' && draftRef.current) { e.preventDefault(); settle(finishPen(draftRef.current, e.shiftKey)); return; }
-    if (!e.metaKey && !e.ctrlKey && !e.altKey && TOOL_SHORTCUTS[e.key.toLowerCase()]) { cancel(); props.onTool(TOOL_SHORTCUTS[e.key.toLowerCase()]); return; }
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && TOOL_SHORTCUTS[e.key.toLowerCase()]) { e.preventDefault(); cancel(); props.onTool(TOOL_SHORTCUTS[e.key.toLowerCase()]); return; }
     if (!canEdit || !shown.length) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
@@ -189,11 +184,11 @@ export function SketchCanvas(props: Props) {
   };
   const ids = paintIDs(props.doc);
   const pin = 4 / scale();
-  const zoom = (factor: number) => { cancel(); setView(v => { const width = Math.max(30, Math.min(12000, v.width * factor)), height = width * v.height / v.width; return { x: v.x + (v.width - width) / 2, y: v.y + (v.height - height) / 2, width, height }; }); };
-  return <div className="sketch-canvas-wrap">
-    <svg ref={svg} className="sketch-canvas" aria-label="Sketch drawing canvas" tabIndex={0}
-      viewBox={`${view.x} ${view.y} ${view.width} ${view.height}`} onPointerDown={down} onPointerMove={move}
-      onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={() => { if (activePointer.current !== null) cancel(); }} onKeyDown={key} onKeyUp={e => { if (e.code === 'Space') space.current = false; }} onBlur={() => { space.current = false; }}
+  // World-space layer inside FreeformCanvas: one SVG unit is one canvas pixel, and the
+  // camera transform above it makes getScreenCTM() map pointers straight to drawing units.
+  return <svg ref={svg} className="sketch-canvas" aria-label="Sketch drawing canvas" tabIndex={0} width={1} height={1} overflow="visible"
+      onPointerDown={down} onPointerMove={move}
+      onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={() => { if (activePointer.current !== null) cancel(); }} onKeyDown={key}
       onDoubleClick={e => {
         if (draftRef.current?.tool === 'pen') { settle(finishPen(draftRef.current, e.shiftKey)); return; }
         if (props.tool !== 'node' || !selected || !canEdit || (e.target as SVGElement).hasAttribute('data-node')) return;
@@ -202,7 +197,8 @@ export function SketchCanvas(props: Props) {
       }}>
       <defs><pattern id="sketch-grid" width={props.snap.gridStepPx} height={props.snap.gridStepPx} patternUnits="userSpaceOnUse"><path d={`M${props.snap.gridStepPx} 0 H0 V${props.snap.gridStepPx}`} fill="none" stroke="#dce2e8" strokeWidth={1 / scale()} /></pattern></defs>
       <PaintDefinitions doc={props.doc} ids={ids} preview={preview} />
-      <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />
+      <rect className="sketch-capture" x={-5e6} y={-5e6} width={1e7} height={1e7} fill="transparent" />
+      <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />
       {props.snap.grid && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
       {[...props.doc.layers].reverse().filter(l => l.visible).map(l => <g key={l.id} data-layer-id={l.id} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none' }}>
         {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p; const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
@@ -233,7 +229,5 @@ export function SketchCanvas(props: Props) {
         </g>)}
         {selected.points.map((p, i) => <rect key={i} data-node={i} aria-label={`Anchor ${i + 1}`} x={p[0] - pin} y={p[1] - pin} width={pin * 2} height={pin * 2} className={props.node?.index === i ? 'active' : ''} />)}
       </g>}
-    </svg>
-    <div className="sketch-view-controls" data-workspace-overlay="bottom right"><span>Space-drag to pan</span><Button onClick={() => zoom(1.25)}>Zoom out</Button><Button onClick={() => zoom(.8)}>Zoom in</Button><Button onClick={() => { cancel(); setView({ x: 0, y: 0, width: props.doc.widthPx, height: props.doc.heightPx }); }}>Fit</Button></div>
-  </div>;
+    </svg>;
 }

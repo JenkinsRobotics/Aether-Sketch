@@ -33,7 +33,9 @@ Sketch concepts, markups and visual ideas with a fast vector canvas: pens, shape
 - ✅ **Shapes and text** — Rectangles, ellipses and editable text with fills and strokes.
 - ✅ **Layers and groups** — Nested layers and groups, multi-path transforms and snapping.
 - ✅ **Path operations** — Trim, offset contours, Booleans and compound shapes with holes.
-- ✅ **Open files** — Local save and reopen, an SVG import subset and SVG export; full undo.
+- ✅ **Infinite board** — A pannable, zoomable dot-grid canvas around the artboard, with sticky notes, text boxes, tables, images, files and connectors beside the drawing.
+- ✅ **Arrange** — Align, distribute, stack, flip and rotate selections; command search and standard zoom and stacking shortcuts.
+- ✅ **Open files** — Local save and reopen, an SVG import subset, SVG and 2× PNG export; full undo.
 - ✅ **Model Studio interface** — The shared Aether interface: a transparent document header, floating resizable side cards, a separate tool tray, saved layouts and themes — the same in every app.
 
 ### In progress

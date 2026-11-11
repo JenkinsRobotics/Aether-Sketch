@@ -24,3 +24,17 @@ it('roundtrips compound contours and editable text, rejecting malformed child ge
 });
 
 it('upgrades v1 drawings without losing their geometry',()=>{const doc=newDocument();const old={...doc,version:1};expect(readDocument(JSON.stringify(old))).toEqual(doc);});
+
+it('roundtrips board items and rejects unsafe or dangling ones',()=>{
+  const doc=newDocument();
+  doc.board=[{id:'n',kind:'sticky',x:10,y:10,width:180,height:180,text:'Idea',fill:'#f6d365'},{id:'t',kind:'text',x:300,y:10,width:200,height:32,text:'Title'},
+    {id:'i',kind:'image',x:0,y:300,width:40,height:40,src:'data:image/png;base64,iVBORw0KGgo=',name:'a.png'},{id:'c',kind:'connector',x:0,y:0,width:0,height:0,from:'n',to:'t'}];
+  expect(readDocument(serializeDocument(doc))).toEqual(doc);
+  const bad=(patch:object)=>()=>readDocument(JSON.stringify({...doc,board:[{...doc.board![0],...patch}]}));
+  expect(bad({kind:'script'})).toThrow();
+  expect(bad({src:'https://example.com/a.png'})).toThrow();
+  expect(bad({src:'data:image/svg+xml;base64,PHN2Zz4='})).toThrow();
+  expect(bad({fill:'red'})).toThrow();
+  expect(bad({id:doc.layers[0].id})).toThrow();
+  expect(()=>readDocument(JSON.stringify({...doc,board:[doc.board![3]]}))).toThrow();
+});
