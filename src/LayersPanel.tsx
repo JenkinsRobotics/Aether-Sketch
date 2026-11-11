@@ -2,13 +2,27 @@ import { useState } from 'react';
 import { AetherIcon, TreePanel, type TreeNode } from '@aether/ui';
 import { ancestors, groupPaths, pathLocked, pathVisible, moveTreeItem } from './structure';
 import { newLayer, type SketchDocument, type Layer } from './document';
-export function LayersPanel({ doc, layer, selected, onSelect, commit }: {
+import type { BoardItem } from './board';
+
+/** Tree id of the Board section: notes, text boxes, tables and media beside the drawing. */
+export const BOARD_NODE = 'aether-sketch-board';
+const BOARD_LABEL: Record<string, string> = { sticky: 'Note', text: 'Text box', table: 'Table', image: 'Image', attachment: 'File', pen: 'Ink', rectangle: 'Shape', 'rounded-rectangle': 'Shape', ellipse: 'Shape' };
+const BOARD_ICON: Record<string, string> = { sticky: 'notes', text: 'text', table: 'grid-3', image: 'image', attachment: 'file-generic' };
+const boardLabel = (item: BoardItem) => {
+  const text = (item.text ?? item.name ?? item.cells?.flat().find(Boolean) ?? '').trim().replace(/\s+/g, ' ');
+  return `${BOARD_LABEL[item.kind] ?? 'Item'}${text ? ` · ${text.slice(0, 40)}` : ''}`;
+};
+
+export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard }: {
   doc: SketchDocument; layer: Layer; selected: string[]; onSelect: (layerID: string, ids: string[]) => void;
   commit: (change: (doc: SketchDocument) => SketchDocument) => void;
+  boardSelection?: readonly string[]; onSelectBoard?: (ids: string[]) => void; onDeleteBoard?: (ids: string[]) => void;
 }) {
+  const board = (doc.board ?? []).filter(i => i.kind !== 'connector'), boardIDs = new Set(board.map(i => i.id));
   const [renaming, setRenaming] = useState<string | null>(null), [treeSelection, setTreeSelection] = useState<string | null>(null);
   const locate = (id: string) => doc.layers.find(l => l.id === id || l.paths.some(p => p.id === id) || l.groups?.some(g => g.id === id));
   const command = (id: string, action: string, value?: string) => {
+    if (id === BOARD_NODE || boardIDs.has(id)) { if (action === 'delete') onDeleteBoard?.(id === BOARD_NODE ? [...boardIDs] : [id]); return; }
     const owner = locate(id); if (!owner) return;
     if (action === 'rename' && value === undefined) { setRenaming(id); return; }
     commit(d => {
@@ -40,22 +54,27 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit }: {
     const rank = (id: string) => Math.max(-1, ...l.paths.map((p, i) => p.id === id || ancestors(l, p.groupID).some(g => g.id === id) ? i : -1));
     return rank(b.id) - rank(a.id);
   });
-  const nodes = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: <AetherIcon name="layers" />, badge: String(l.paths.length), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
+  const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: <AetherIcon name="layers" />, badge: String(l.paths.length), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
+  // Board items draw above every layer, so their section leads the tree, newest first.
+  if (board.length) nodes.unshift({ id: BOARD_NODE, label: 'Board', icon: <AetherIcon name="notes" />, badge: String(board.length),
+    children: [...board].reverse().map(item => ({ id: item.id, label: boardLabel(item), icon: <AetherIcon name={BOARD_ICON[item.kind] ?? 'rectangle'} /> })) });
   const treeOwner = treeSelection ? locate(treeSelection) : undefined;
   const treeMatches = treeSelection && treeOwner?.id === layer.id && (selected.includes(treeSelection) ||
     (treeOwner.groups?.some(g => g.id === treeSelection) && groupPaths(treeOwner, treeSelection).every(p => selected.includes(p.id))) ||
     (!selected.length && treeSelection === layer.id));
-  const current = treeMatches ? treeSelection : selected[0] ?? layer.id;
-  const highlighted = new Set(selected.length ? selected : [layer.id]);
+  const current = boardSelection.length ? boardSelection[0] : treeMatches ? treeSelection : selected[0] ?? layer.id;
+  const highlighted = new Set(boardSelection.length ? boardSelection : selected.length ? selected : [layer.id]);
   if (treeMatches) highlighted.add(treeSelection);
   return <TreePanel title="Layers" ariaLabel="Drawing layers" nodes={nodes} selectedIDs={highlighted}
     onSelect={ids => {
+      const picked = ids.flatMap(id => id === BOARD_NODE ? [...boardIDs] : boardIDs.has(id) ? [id] : []);
+      if (picked.length) { setTreeSelection(null); onSelectBoard?.(picked); return; }
       const id = ids.at(-1), owner = id && locate(id); if (!id || !owner) return; setTreeSelection(id);
       const paths = ids.flatMap(id => owner.paths.some(p => p.id === id) ? [id] : groupPaths(owner, id).map(p => p.id)); onSelect(owner.id, paths);
     }}
     renamingID={renaming} onRename={(id, value) => command(id, 'rename', value)} onCancelRename={() => setRenaming(null)} onAction={(id, action) => command(id, action)}
-    onMove={(source, target, position) => commit(d => moveTreeItem(d, source, target, position))}
-    menuItems={id => [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' }, { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
+    onMove={(source, target, position) => { if (![source, target].some(id => id === BOARD_NODE || boardIDs.has(id))) commit(d => moveTreeItem(d, source, target, position)); }}
+    menuItems={id => id === BOARD_NODE || boardIDs.has(id) ? [{ id: 'delete', label: id === BOARD_NODE ? 'Delete all board items' : 'Delete' }] : [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' }, { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
     onCommand={command} controls={[
       { id: 'add', label: 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = newLayer(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } },
       { id: 'rename', label: 'Rename item', icon: <AetherIcon name="pencil" />, onClick: () => setRenaming(current), shortcut: 'F2' },

@@ -20,7 +20,7 @@ import { pathBounds } from '@aether/sketch';
 import { alignPaths, distributePaths, flipPaths, orderPaths, rotatePaths, type AlignMode, type OrderMode } from './arrange';
 import { BoardInspector } from './BoardInspector';
 import { STICKY_COLORS } from './board';
-import { AetherIcon, ToolIcon, StudioWorkspace as WorkspaceShell, WorkspaceSwitcher, WorkspaceFileBar, standardAuxiliaryPanels, standardWorkspacePanels, WorkspaceRibbon, StudioDocumentBar as DocumentBar,
+import { AetherIcon, ToolIcon, StudioWorkspace as WorkspaceShell, WorkspaceFileBar, standardAuxiliaryPanels, standardWorkspacePanels, WorkspaceRibbon, StudioDocumentBar as DocumentBar,
   Slider, StudioModeButton, WorkspaceWindowMenu, MenuButton, type ToolIconName } from '@aether/ui';
 import { SketchCanvas, type EditorTool } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
@@ -55,6 +55,8 @@ const ALIGN: { id: AlignMode; label: string }[] = [{ id: 'left', label: 'Align l
   { id: 'top', label: 'Align top' }, { id: 'middle', label: 'Align vertical centres' }, { id: 'bottom', label: 'Align bottom' }];
 const ORDER: { id: OrderMode; label: string }[] = [{ id: 'front', label: 'Bring to front' }, { id: 'forward', label: 'Bring forward' }, { id: 'backward', label: 'Send backward' }, { id: 'back', label: 'Send to back' }];
 const PANELS_KEY = 'aether-sketch.panels';
+// A controlled layout ignores defaultOpenLeft/Right, so the first-run layout opens Layers and Properties here.
+const DEFAULT_PANELS: WorkspacePanelState = { layers: { placement: 'docked' }, properties: { placement: 'docked' } };
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const readDataURL = (file: File) => new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
 const imageSize = (src: string) => new Promise<{ width: number; height: number }>(resolve => { const i = new Image(); i.onload = () => resolve({ width: i.naturalWidth, height: i.naturalHeight }); i.onerror = () => resolve({ width: 240, height: 160 }); i.src = src; });
@@ -71,7 +73,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [preset, setPreset] = useState<'docked' | 'floating' | 'canvas'>('floating'), [tool, setTool] = useState<AppTool>('select');
   const [camera, setCamera] = useState<FreeformCamera>({ x: 48, y: 48, zoom: 1 }), [boardSelection, setBoardSelection] = useState<string[]>([]);
   const [ribbonTab, setRibbonTab] = useState('draw'), canvasController = useRef<FreeformCanvasController>(null), imageFile = useRef<HTMLInputElement>(null);
-  const [panelState, setPanelState] = useState<WorkspacePanelState>(() => { try { const v: unknown = JSON.parse(sessionStorage.getItem(PANELS_KEY) ?? '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v as WorkspacePanelState : {}; } catch { return {}; } });
+  const [panelState, setPanelState] = useState<WorkspacePanelState>(() => { try { const v: unknown = JSON.parse(sessionStorage.getItem(PANELS_KEY) ?? '{}'); return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length ? v as WorkspacePanelState : DEFAULT_PANELS; } catch { return DEFAULT_PANELS; } });
   const [paint, setPaint] = useState<PaintStyle>(defaultPaint), [insideID, setInsideID] = useState<string | null>(null);
   const [contour, setContour] = useState(0), [recoveryStatus, setRecoveryStatus] = useState(initial ? 'Recovered local draft' : '');
   const draftID = useRef(crypto.randomUUID()), flushRecovery = useRef<() => void>(()=>{});
@@ -254,13 +256,13 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       if (files.length) { const at = { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom }; void attach(files, at); }
     }} />
     <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
-    <WorkspaceShell workspaceControls={<WorkspaceSwitcher workspaces={[{id:"vector",label:"Vector"}]} workspaceID="vector" onSelect={()=>{}}/>} preset={preset} toolbarSpan={preset === 'docked' ? 'window' : 'center'} toolPosition={preset === 'docked' ? 'top' : 'bottom'} pinnedPanels={['layers']}
+    <WorkspaceShell preset={preset} toolbarSpan={preset === 'docked' ? 'window' : 'center'} toolPosition={preset === 'docked' ? 'top' : 'bottom'} pinnedPanels={['layers']}
       sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }} preservePanelContent
       panelState={panelState} onPanelStateChange={state => { setPanelState(state); try { sessionStorage.setItem(PANELS_KEY, JSON.stringify(state)); } catch { /* layout is a convenience */ } }}
       bottom={<WorkspaceFileBar fileActions={fileActions} tabs={[{id:'drawing',label:name,dirty:(isLocalDocument()||isStudioHosted())?persistence.state.phase!=='saved':serializeDocument(doc)!==saved,status:(isLocalDocument()||isStudioHosted())?(persistence.state.phase==='saved'?'Saved':persistence.state.phase==='saving'||persistence.state.phase==='pending'?'Saving…':persistence.ready?'Not saved':'Opening…'):(recoveryStatus||'Unsaved draft'),statusTitle:persistence.state.message,icon:<AetherIcon name="file-sketch"/>}]} activeID="drawing" onSelect={()=>{}} onAdd={newDrawing} addLabel="Create new drawing" trailing={<span className="aui-workspace-file-status" role="status">{notice}</span>}
         manager={{connection:documentConnection,activeID:layer.id,documentGroups:[{id:"layers",label:"Layers",items:doc.layers.map(item=>({id:item.id,name:item.name,kind:"layer",detail:"Layer"}))}],onOpenItem:item=>{setInsideID(null);setLayerID(item.id);setSelected([]);setNode(null);}}}/>}
- toolbar={<WorkspaceRibbon variant={preset === 'docked' ? 'docked' : 'floating'} appearance="glass" workspaceLayout="none"
-      workspaces={[]} workspaceID="vector" onWorkspaceSelect={() => {}} activeTabID={ribbonTab} onTabSelect={setRibbonTab} tabs={[
+ toolbar={<WorkspaceRibbon variant={preset === 'docked' ? 'docked' : 'floating'} appearance="glass" workspaceLayout="column"
+      workspaces={[{ id: 'vector', label: 'Vector', icon: <AetherIcon name="sketch" /> }]} workspaceID="vector" onWorkspaceSelect={() => {}} activeTabID={ribbonTab} onTabSelect={setRibbonTab} tabs={[
       { id: 'draw', label: 'Draw', groups: [
         { id: 'select', label: 'Select', tools: tools.slice(0, 2).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
         { id: 'draw', label: 'Draw', tools: tools.slice(2, 7).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
@@ -296,7 +298,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         ] },
       ] },
     ]} onCommand={editCommand} />} style={{ flex: 1, minHeight: 0 }} defaultOpenLeft={['layers']} defaultOpenRight={['properties']}
-      leftPanels={standardAuxiliaryPanels(standardWorkspacePanels([{ id: 'layers', title: 'Layers', icon: <AetherIcon name="layers" />, collection: true, content: <LayersPanel doc={doc} layer={layer} selected={selected}
+      leftPanels={standardAuxiliaryPanels(standardWorkspacePanels([{ id: 'layers', title: 'Layers', icon: <AetherIcon name="layers" />, collection: true, content: <LayersPanel doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
+        onDeleteBoard={ids => { changeBoard(board.filter(i => !ids.includes(i.id) && !(i.kind === 'connector' && (ids.includes(i.from ?? '') || ids.includes(i.to ?? ''))))); setBoardSelection([]); }}
         onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> },
       {id:'advisor',title:'AI advisor',icon:null,content:<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>},
       ], { features: "layers" }, documentConnection, { historyTabStorageKey: "aether-sketch.history-tab", history: <SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/> }))}
