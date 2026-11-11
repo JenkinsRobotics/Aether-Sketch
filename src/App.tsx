@@ -1,3 +1,4 @@
+import {isLocalDocument,isStudioHosted} from '@aether/session/home/runtime';
 import { SaveRecoveryPanel } from '@aether/session/SaveRecoveryPanel';
 import { SketchHistoryPanel } from "./SketchHistoryPanel";
 import { useAgentInteraction } from './useAgentInteraction';
@@ -41,7 +42,7 @@ function splicePaths(paths: DrawingPath[], remove: string[], add: DrawingPath[])
   return remaining;
 }
 export default function App({ initial, recoveryKey }: { initial?: Recovery; recoveryKey?: string | null }) {
-  const applications = useStudioApplications();
+  const applications = useStudioApplications(isStudioHosted());
   const history = useDocument(initial?.doc), { doc } = history;
   const commit = (change: (doc: typeof history.doc) => typeof history.doc) => history.commit(d => repairClips(change(d)));
   const [agentMessages,setAgentMessages]=useState<AssistantMessage[]>([]);
@@ -62,9 +63,9 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   }});
   const documentConnection=useDocumentConnection({app:'sketch',id:persistence.file?.id,name,writable:persistence.file?.writable,flush:persistence.flush,saveCopy:persistence.saveCopy});
   const beginDocument=async()=>{
-    if(location.pathname.startsWith('/sketch/'))await persistence.flush();
+    if((isLocalDocument()||isStudioHosted()))await persistence.flush();
     flushRecovery.current();draftID.current=crypto.randomUUID();
-    window.history.replaceState(null,'',location.pathname);setDocumentIdentity(crypto.randomUUID());
+    window.history.replaceState(null,'',location.pathname+(isLocalDocument()?'?editor&storage=local':'?editor'));setDocumentIdentity(crypto.randomUUID());
   };
   const file = useRef<HTMLInputElement>(null), layer = doc.layers.find(l => l.id === layerID) ?? doc.layers[0];
   const chosen = layer.paths.filter(p => selected.includes(p.id)), disabled = layer.locked || !layer.visible || chosen.some(p => pathLocked(layer, p) || !pathVisible(layer, p));
@@ -78,7 +79,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const chooseTool = (next: EditorTool) => { setTool(next); setNode(null); };
   const undo = () => { setEpoch(e => e + 1); history.undo(); }, redo = () => { setEpoch(e => e + 1); history.redo(); };
   const agentInteraction=useAgentInteraction({contextKey:`${documentIdentity}:${persistence.file?.id??draftID.current}:${location.search}`,doc,
-    writable:!location.pathname.startsWith('/sketch/')||(persistence.ready&&persistence.file?.writable!==false),commit,
+    writable:!(isLocalDocument()||isStudioHosted())||(persistence.ready&&persistence.file?.writable!==false),commit,
     canUndo:history.canUndo,canRedo:history.canRedo,undo,redo,
     select:(id,ids)=>{setLayerID(id);setSelected(ids);setNode(null);setInsideID(null);setContour(0);setTool('select');setEpoch(e=>e+1);},
   });
@@ -148,7 +149,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     }} />
     <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
     <WorkspaceShell workspaceControls={<WorkspaceSwitcher workspaces={[{id:"vector",label:"Vector"}]} workspaceID="vector" onSelect={()=>{}}/>} preset={preset} toolbarSpan="center" pinnedPanels={['layers']}
-      bottom={<WorkspaceFileBar fileActions={fileActions} tabs={[{id:'drawing',label:name,dirty:location.pathname.startsWith('/sketch/')?persistence.state.phase!=='saved':serializeDocument(doc)!==saved,status:location.pathname.startsWith('/sketch/')?(persistence.state.phase==='saved'?'Saved':persistence.state.phase==='saving'||persistence.state.phase==='pending'?'Saving…':persistence.ready?'Not saved':'Opening…'):(recoveryStatus||'Unsaved draft'),statusTitle:persistence.state.message,icon:<AetherIcon name="file-sketch"/>}]} activeID="drawing" onSelect={()=>{}} onAdd={newDrawing} addLabel="Create new drawing" trailing={<span className="aui-workspace-file-status" role="status">{notice}</span>}
+      bottom={<WorkspaceFileBar fileActions={fileActions} tabs={[{id:'drawing',label:name,dirty:(isLocalDocument()||isStudioHosted())?persistence.state.phase!=='saved':serializeDocument(doc)!==saved,status:(isLocalDocument()||isStudioHosted())?(persistence.state.phase==='saved'?'Saved':persistence.state.phase==='saving'||persistence.state.phase==='pending'?'Saving…':persistence.ready?'Not saved':'Opening…'):(recoveryStatus||'Unsaved draft'),statusTitle:persistence.state.message,icon:<AetherIcon name="file-sketch"/>}]} activeID="drawing" onSelect={()=>{}} onAdd={newDrawing} addLabel="Create new drawing" trailing={<span className="aui-workspace-file-status" role="status">{notice}</span>}
         manager={{connection:documentConnection,activeID:layer.id,documentGroups:[{id:"layers",label:"Layers",items:doc.layers.map(item=>({id:item.id,name:item.name,kind:"layer",detail:"Layer"}))}],onOpenItem:item=>{setInsideID(null);setLayerID(item.id);setSelected([]);setNode(null);}}}/>}
  toolbar={<WorkspaceRibbon compactTools defaultDensity="compact" workspaceLayout="none"
       workspaces={[]} workspaceID="vector" onWorkspaceSelect={() => {}}

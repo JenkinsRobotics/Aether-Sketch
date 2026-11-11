@@ -1,3 +1,4 @@
+import {isLocalDocument, isStudioHosted} from '@aether/session/home/runtime';
 import { useEffect, useState } from 'react';
 import { Button } from '@aether/ui';
 import App from './App';
@@ -5,6 +6,7 @@ import { loadRecovery, recoveryKey, type Recovery } from './recovery';
 export function RecoveryWorkspace() {
   const [account,setAccount]=useState<string | null>(null);
   useEffect(()=>{
+    if (isLocalDocument() || !isStudioHosted()) { setAccount("local-device"); return; }
     let active=true, changed=false;
     const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),5000);
     const sync=(event:Event)=>{ changed=true; const user=(event as CustomEvent<{username?:string}|null>).detail; setAccount(user?.username??'signed-out'); };
