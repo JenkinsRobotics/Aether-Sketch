@@ -126,10 +126,12 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if(file)setName(file.name.replace(/\.aethersketch$/i,''));
   }});
   const documentConnection=useDocumentConnection({app:'sketch',id:persistence.file?.id,name,writable:persistence.file?.writable,flush:persistence.flush,saveCopy:persistence.saveCopy});
-  const beginDocument=async()=>{
+  /** Switch to another drawing. `open` must put the next drawing in history in the same render as the identity change:
+   * the hosted document reads the text at that render, so opening it later would save and reload the previous drawing. */
+  const beginDocument=async(open:()=>void)=>{
     if((isLocalDocument()||isStudioHosted()))await persistence.flush();
     flushRecovery.current();draftID.current=crypto.randomUUID();
-    window.history.replaceState(null,'',location.pathname+(isLocalDocument()?'?editor&storage=local':'?editor'));setDocumentIdentity(crypto.randomUUID());
+    window.history.replaceState(null,'',location.pathname+(isLocalDocument()?'?editor&storage=local':'?editor'));open();setDocumentIdentity(crypto.randomUUID());
   };
   const file = useRef<HTMLInputElement>(null), layer = doc.layers.find(l => l.id === layerID) ?? doc.layers[0];
   const chosen = layer.paths.filter(p => selected.includes(p.id)), disabled = layer.locked || !layer.visible || chosen.some(p => pathLocked(layer, p) || !pathVisible(layer, p));
@@ -241,8 +243,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (id === 'ungroup') changeLayer(l => ungroupSelection(l, selected));
     if (id === 'delete') remove();
   };
-  const openSample=(sample: typeof SAMPLES[number])=>{void beginDocument().then(()=>{history.open(sample.make());setName(sample.name);setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);setTimeout(()=>canvasController.current?.fit(),0);}).catch(e=>setNotice(e.message));};
-  const newDrawing=()=>{void beginDocument().then(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
+  const openSample=(sample: typeof SAMPLES[number])=>{void beginDocument(()=>{const next=sample.make();history.open(next);setName(sample.name);setLayerID(next.layers[0].id);setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
+  const newDrawing=()=>{void beginDocument(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
   const fileActions = <MenuButton label="Document controls" items={[
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
         {id:'import',label:'Import SVG…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},...EXPORTS.map(f=>({id:f.id,label:f.label,icon:<AetherIcon name="export"/>})),
@@ -305,7 +307,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       const input = e.currentTarget, selectedFile = input.files?.[0]; if (!selectedFile) return;
       try {
         if (selectedFile.size > 20_000_000) throw new Error('This drawing exceeds the 20 MB limit.');
-        const next = readDocument(await selectedFile.text()); await beginDocument(); history.open(next); setInsideID(null); setLayerID(next.layers[0].id); setSelected([]); setNode(null); setEpoch(e => e + 1);
+        const next = readDocument(await selectedFile.text()); await beginDocument(() => { history.open(next); setInsideID(null); setLayerID(next.layers[0].id); setSelected([]); setNode(null); setEpoch(e => e + 1); });
         setName(selectedFile.name.replace(/\.aethersketch$/i, '')); setSaved(serializeDocument(next)); setNotice('Drawing opened.');
       } catch (error) { setNotice(error instanceof Error ? error.message : 'Unable to open drawing.'); }
       input.value = '';
@@ -318,7 +320,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     <StandardAppShell className="sketch-app" application={{ apps: applications, id: "sketch", name: "Aether Sketch" }} documentName={`${name}.aethersketch`}
       documentMenu={fileActions}
       documentState={<span className="sketch-recovery-status" data-recovery-status="" role="status">{[saveState, recoveryStatus, notice].filter(Boolean).join(' · ')}</span>}
-      headerTrailing={<DraftRecovery scope={recoveryKey} onRestore={draft=>{void beginDocument().then(()=>{history.open(draft.doc);setName(draft.name);setLayerID(draft.doc.layers[0].id);setSelected([]);setInsideID(null);setContour(0);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));}}/>}
+      headerTrailing={<DraftRecovery scope={recoveryKey} onRestore={draft=>{void beginDocument(()=>{history.open(draft.doc);setName(draft.name);setLayerID(draft.doc.layers[0].id);setSelected([]);setInsideID(null);setContour(0);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));}}/>}
       commands={searchCommands} onCommand={runCommand} layout={preset} onLayoutChange={setPreset}
       panelState={panelState} onPanelStateChange={state => { setPanelState(state); try { sessionStorage.setItem(PANELS_KEY, JSON.stringify(state)); } catch { /* layout is a convenience */ } }}
       sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }}
