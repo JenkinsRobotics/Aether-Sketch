@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AetherIcon, TreePanel, type TreeNode } from '@aether/ui';
-import { ancestors, groupPaths, pathLocked, pathVisible, moveTreeItem } from './structure';
+import { ancestors, canMergeDown, duplicateLayer, groupPaths, mergeDown, pathLocked, pathVisible, moveTreeItem } from './structure';
 import { newLayer, type SketchDocument, type Layer } from './document';
 import type { BoardItem } from './board';
 
@@ -25,6 +25,8 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     if (id === BOARD_NODE || boardIDs.has(id)) { if (action === 'delete') onDeleteBoard?.(id === BOARD_NODE ? [...boardIDs] : [id]); return; }
     const owner = locate(id); if (!owner) return;
     if (action === 'rename' && value === undefined) { setRenaming(id); return; }
+    if (owner.id === id && action === 'duplicate') { commit(d => duplicateLayer(d, id)); return; }
+    if (owner.id === id && action === 'merge-down') { commit(d => mergeDown(d, id)); return; }
     commit(d => {
       if (action === 'delete' && owner.id === id && !owner.locked && d.layers.length > 1) return { ...d, layers: d.layers.filter(l => l.id !== id) };
       return { ...d, layers: d.layers.map(l => {
@@ -74,7 +76,8 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     }}
     renamingID={renaming} onRename={(id, value) => command(id, 'rename', value)} onCancelRename={() => setRenaming(null)} onAction={(id, action) => command(id, action)}
     onMove={(source, target, position) => { if (![source, target].some(id => id === BOARD_NODE || boardIDs.has(id))) commit(d => moveTreeItem(d, source, target, position)); }}
-    menuItems={id => id === BOARD_NODE || boardIDs.has(id) ? [{ id: 'delete', label: id === BOARD_NODE ? 'Delete all board items' : 'Delete' }] : [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' }, { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
+    menuItems={id => id === BOARD_NODE || boardIDs.has(id) ? [{ id: 'delete', label: id === BOARD_NODE ? 'Delete all board items' : 'Delete' }] : [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' },
+      ...(locate(id)?.id === id ? [{ id: 'duplicate', label: 'Duplicate layer' }, { id: 'merge-down', label: 'Merge down', disabled: !canMergeDown(doc, id) }] : []), { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
     onCommand={command} controls={[
       { id: 'add', label: 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = newLayer(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } },
       { id: 'rename', label: 'Rename item', icon: <AetherIcon name="pencil" />, onClick: () => setRenaming(current), shortcut: 'F2' },

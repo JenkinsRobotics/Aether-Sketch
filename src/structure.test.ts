@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
-import { newDocument, readDocument, serializeDocument, type DrawingPath } from './document';
-import { groupSelection, ungroupSelection, pathLocked, pathVisible, moveTreeItem, groupPaths } from './structure';
+import { newDocument, newLayer, readDocument, serializeDocument, type DrawingPath } from './document';
+import { canMergeDown, duplicateLayer, groupSelection, mergeDown, ungroupSelection, pathLocked, pathVisible, moveTreeItem, groupPaths } from './structure';
 const path = (id: string): DrawingPath => ({ id, points: [[0, 0], [100, 0], [100, 100]], closed: true, color: '#123456', fill: '#abcdef', widthPx: 3, opacity: .7, nodeModes: ['corner', 'smooth', 'symmetric'] });
 it('groups a selection into a contiguous paint block without flattening nested groups', () => {
   const layer = { ...newDocument().layers[0], paths: ['a', 'b', 'c', 'd'].map(path) };
@@ -38,4 +38,16 @@ it('validates optional group, fill and node-mode data and rejects malformed hier
   doc.layers[0].groups![0].parentID = 'g'; expect(() => readDocument(serializeDocument(doc))).toThrow();
   delete doc.layers[0].groups![0].parentID;
   doc.layers[0].paths[0].nodeModes = ['corner']; expect(() => readDocument(serializeDocument(doc))).toThrow();
+});
+
+it('duplicates a layer above itself with fresh ids, and merges a layer down', () => {
+  const doc = newDocument(), top = { ...newLayer('Top'), opacity: .5 };
+  top.groups = [{ id: 'g', name: 'Group' }]; top.paths = [{ id: 'p', groupID: 'g', points: [[0, 0], [1, 1]], closed: false, color: '#000000', widthPx: 1, opacity: .8 }];
+  doc.layers.unshift(top);
+  let n = 0; const copy = duplicateLayer(doc, top.id, () => `id${n++}`);
+  expect(copy.layers.map(l => l.name)).toEqual(['Top copy', 'Top', 'Layer 1']);
+  expect(copy.layers[0].paths[0]).toMatchObject({ id: 'id1', groupID: 'id0' }); expect(copy.layers[0].groups![0].id).toBe('id0');
+  const merged = mergeDown(doc, top.id);
+  expect(merged.layers.map(l => l.name)).toEqual(['Layer 1']); expect(merged.layers[0].paths[0].opacity).toBeCloseTo(.4);
+  expect(canMergeDown({ ...doc, layers: [{ ...top, blend: 'multiply' }, doc.layers[1]] }, top.id)).toBe(false);
 });

@@ -58,3 +58,26 @@ export function moveTreeItem(doc: SketchDocument, source: string, target: string
     return next;
   }) };
 }
+
+/** A copy of a layer above it, with new ids throughout (groups, clip boundaries and paths). */
+export function duplicateLayer(doc: SketchDocument, id: string, nextID: () => string = () => crypto.randomUUID()): SketchDocument {
+  const index = doc.layers.findIndex(l => l.id === id); if (index < 0) return doc;
+  const source = doc.layers[index], ids = new Map([...(source.groups ?? []), ...source.paths].map(item => [item.id, nextID()]));
+  const copy: Layer = { ...source, id: nextID(), name: `${source.name} copy`.slice(0, 200),
+    groups: source.groups?.map(g => ({ ...g, id: ids.get(g.id)!, parentID: g.parentID && ids.get(g.parentID), clipPathID: g.clipPathID && ids.get(g.clipPathID) })),
+    paths: source.paths.map(p => ({ ...p, id: ids.get(p.id)!, groupID: p.groupID && ids.get(p.groupID) })) };
+  return { ...doc, layers: [...doc.layers.slice(0, index), copy, ...doc.layers.slice(index)] };
+}
+/** Whether a layer can merge into the one below: both unlocked and the upper layer blends normally. */
+export const canMergeDown = (doc: SketchDocument, id: string) => {
+  const index = doc.layers.findIndex(l => l.id === id), upper = doc.layers[index], lower = doc.layers[index + 1];
+  return !!upper && !!lower && !upper.locked && !lower.locked && (upper.blend ?? 'normal') === 'normal';
+};
+/** Merge a layer into the one below. The upper layer's opacity is kept by folding it into its paths. */
+export function mergeDown(doc: SketchDocument, id: string): SketchDocument {
+  if (!canMergeDown(doc, id)) return doc;
+  const index = doc.layers.findIndex(l => l.id === id), upper = doc.layers[index], lower = doc.layers[index + 1], fade = upper.opacity ?? 1;
+  const merged: Layer = { ...lower, groups: [...(lower.groups ?? []), ...(upper.groups ?? [])],
+    paths: [...lower.paths, ...upper.paths.map(p => ({ ...p, opacity: p.opacity * fade, hidden: p.hidden || !upper.visible || undefined }))] };
+  return { ...doc, layers: [...doc.layers.slice(0, index), merged, ...doc.layers.slice(index + 2)] };
+}

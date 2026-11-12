@@ -1,5 +1,6 @@
 import { parseSVGPath, svgElementPaths, pathData, transformPath, type SketchPath, type VectorGradient } from '@aether/sketch';
-import { newDocument, readDocument, serializeDocument, type DrawingPath, type SketchDocument } from './document';
+import { BLEND_MODES, newDocument, newLayer, readDocument, serializeDocument, type BlendMode, type DrawingPath, type SketchDocument } from './document';
+const INKSCAPE = 'http://www.inkscape.org/namespaces/inkscape';
 import { defaultPaint } from './paint';
 import { newText, updateText } from './text';
 interface ImportResult { doc: SketchDocument; warnings: string[] }
@@ -24,7 +25,7 @@ export function importSVG(xml: string): ImportResult {
   const dom = new DOMParser().parseFromString(xml, 'image/svg+xml'), root = dom.documentElement;
   if (root.localName !== 'svg' || dom.querySelector('parsererror')) throw Error('Invalid SVG document.');
   if (dom.querySelectorAll('*').length > 12000) throw Error('This SVG has too many elements.');
-  const warnings = new Set<string>(), doc = newDocument(), layer = doc.layers[0]; layer.name = 'Imported SVG'; layer.groups = [];
+  const warnings = new Set<string>(), doc: SketchDocument = { ...newDocument(), infinite: false }; let layer = doc.layers[0]; layer.name = 'Imported SVG'; layer.groups = [];
   const vb = numbers(root.getAttribute('viewBox') ?? '');
   doc.widthPx = vb.length === 4 ? vb[2] : num(root, 'width', 1200); doc.heightPx = vb.length === 4 ? vb[3] : num(root, 'height', 800);
   const initial = vb.length === 4 ? `translate(${-vb[0]} ${-vb[1]})` : '';
@@ -54,6 +55,19 @@ export function importSVG(xml: string): ImportResult {
     const name = e.localName;
     if (['defs','title','desc','metadata'].includes(name)) return;
     if (['script','foreignObject','image','use','style','filter','mask','symbol'].includes(name)) { warnings.add(`Skipped unsupported ${name} elements.`); return; }
+    // Inkscape layers (and our own SVG export) come back as Sketch layers, with name, visibility, opacity and blend.
+    if (name === 'g' && e.getAttributeNS(INKSCAPE, 'groupmode') === 'layer') {
+      const own: Record<string, string> = Object.fromEntries((e.getAttribute('style') ?? '').split(';').filter(Boolean).map(v => { const i = v.indexOf(':'); return [v.slice(0, i).trim(), v.slice(i + 1).trim()]; }));
+      const blend = own['mix-blend-mode'] as BlendMode | undefined, previous = layer;
+      layer = { ...newLayer((e.getAttributeNS(INKSCAPE, 'label') || e.id || `Layer ${doc.layers.length + 1}`).slice(0, 200)), groups: [],
+        visible: own.display !== 'none' && e.getAttribute('display') !== 'none', opacity: clamp(parseFloat(e.getAttribute('opacity') ?? own.opacity ?? '1')),
+        ...(blend && BLEND_MODES.includes(blend) && blend !== 'normal' ? { blend } : {}) };
+      doc.layers.unshift(layer);
+      const { display: _d, opacity: _o, 'mix-blend-mode': _b, ...inheritedStyle } = own;
+      for (const key of inherited) if (e.hasAttribute(key)) inheritedStyle[key] = e.getAttribute(key)!;
+      for (const child of e.children) visit(child, { ...parent, ...inheritedStyle }, `${transform} ${e.getAttribute('transform') ?? ''}`, undefined, opacity, depth + 1);
+      layer = previous; return;
+    }
     const style = { ...parent, ...Object.fromEntries((e.getAttribute('style') ?? '').split(';').filter(Boolean).map(v => { const i=v.indexOf(':'); return [v.slice(0,i).trim(),v.slice(i+1).trim()]; })) };
     for (const key of inherited) if(e.hasAttribute(key)) style[key]=e.getAttribute(key)!;
     if (style.display === 'none' || style.visibility === 'hidden' || e.getAttribute('display') === 'none') return;
@@ -97,6 +111,7 @@ export function importSVG(xml: string): ImportResult {
     layer.paths.push({...paint,...paths[0],subpaths:paths.length>1?paths.slice(1):undefined,fillOpen:fill!=='none',fillRule:style['fill-rule']==='evenodd'?'evenodd':'nonzero',id:crypto.randomUUID(),groupID,name:e.id||'SVG path'});
   }
   visit(root,{},initial);
-  if(!layer.paths.length) throw Error('This SVG contains no supported editable vectors.');
+  if (doc.layers.length > 1 && !doc.layers.at(-1)!.paths.length) doc.layers.pop(); // the default layer, when Inkscape layers held everything
+  if(!doc.layers.some(l => l.paths.length)) throw Error('This SVG contains no supported editable vectors.');
   return {doc:readDocument(serializeDocument(doc)),warnings:[...warnings]};
 }

@@ -1,5 +1,5 @@
 import { textSVG } from './text';
-import { gradientVector, pathData, strokeDash, transformPath } from '@aether/sketch';
+import { gradientVector, pathBounds, pathData, strokeDash, transformPath } from '@aether/sketch';
 import { ancestors, pathLocked, pathVisible } from './structure';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash'] as const;
@@ -60,7 +60,16 @@ export function duplicatePaintSelection(layer: Layer, selected: string[], nextID
   };
 }
 const attributeNames: Record<string, string> = { fillRule: 'fill-rule', fillOpacity: 'fill-opacity', strokeWidth: 'stroke-width', strokeOpacity: 'stroke-opacity', strokeLinecap: 'stroke-linecap', strokeLinejoin: 'stroke-linejoin', strokeDasharray: 'stroke-dasharray' };
-export function drawingSVG(doc: SketchDocument): string {
+const xmlText = (value: string) => value.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+/** What an export frames: the artboard, or for an infinite drawing everything drawn, with a small margin. */
+export function exportArea(doc: SketchDocument) {
+  const drawn = doc.infinite ? pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p)))) : null;
+  if (!drawn) return { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
+  const margin = Math.max(drawn.width, drawn.height) * .02, x = drawn.x - margin, y = drawn.y - margin;
+  return { x, y, width: Math.max(drawn.width + margin * 2, 1e-6), height: Math.max(drawn.height + margin * 2, 1e-6) };
+}
+/** Standard SVG. Each layer is an Inkscape layer (name, hidden state, opacity, blend), so layers survive a round trip through Inkscape. */
+export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string {
   const ids = paintIDs(doc), all = doc.layers.flatMap(l => l.paths);
   const defs = all.map(p => {
     const id = ids.get(p.id)!, g = p.fillGradient;
@@ -70,9 +79,15 @@ export function drawingSVG(doc: SketchDocument): string {
     const position = g.kind === 'linear' ? Object.entries(gradientVector(g.angleDeg)).map(([k, v]) => `${k}="${v}"`).join(' ') : 'cx="0.5" cy="0.5" r="0.5"';
     return clip + `<${tag} id="${id}-gradient" ${position}>${g.stops.map(s => `<stop offset="${s.offset}" stop-color="${s.color}" stop-opacity="${s.opacity}"/>`).join('')}</${tag}>`;
   }).join('');
-  const body = [...doc.layers].reverse().flatMap(l => l.paths.filter(p => pathVisible(l, p)).map(p => {
-    const attrs = Object.entries(paintAttributes(p, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
-    return clipPaths(l, p).reduce((markup, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${markup}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>`));
-  })).join('');
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${doc.widthPx}" height="${doc.heightPx}" viewBox="0 0 ${doc.widthPx} ${doc.heightPx}"><defs>${defs}</defs>${body}</svg>`;
+  const body = [...doc.layers].reverse().map((l, index) => {
+    const shown = { ...l, visible: true };
+    const markup = l.paths.filter(p => pathVisible(shown, p)).map(p => {
+      const attrs = Object.entries(paintAttributes(p, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
+      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>`));
+    }).join('');
+    const style = [l.visible ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');
+    return `<g id="layer${index + 1}" inkscape:groupmode="layer" inkscape:label="${xmlText(l.name)}"${style ? ` style="${style}"` : ''}>${markup}</g>`;
+  }).join('');
+  const n = (v: number) => +v.toPrecision(10);
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${n(area.width)}" height="${n(area.height)}" viewBox="${n(area.x)} ${n(area.y)} ${n(area.width)} ${n(area.height)}"><defs>${defs}</defs>${body}</svg>`;
 }

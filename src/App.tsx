@@ -23,15 +23,16 @@ import { SelectionInspector } from './SelectionInspector';
 import { createDocument } from './create-document';
 import { driveRequest, editorURL, encodeFile, fileIcon, fileType, type DriveFile } from '@aether/session/library/drive-api';
 import { STICKY_COLORS } from './board';
-import { AetherIcon, ToolIcon, Slider, MenuButton, type ToolIconName } from '@aether/ui';
-import { SketchCanvas, type EditorTool } from './SketchCanvas';
+import { AetherIcon, Checkbox, SelectField, ToolIcon, Slider, MenuButton, type ToolIconName } from '@aether/ui';
+import { SketchCanvas, type BrushSettings, type EditorTool } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
 import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, repairClips, type PaintStyle } from './paint';
+import { drawingOpenRaster, drawingPDF, rasterBlob } from './export';
 import { ancestors } from './structure';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
-import { readDocument, serializeDocument, newDocument, type DrawingPath, type Layer } from './document';
+import { BLEND_MODES, readDocument, serializeDocument, newDocument, type BlendMode, type DrawingPath, type Layer } from './document';
 import { useDocument } from './useDocument';
 import './sketch.css';
 const tools: { id: EditorTool; label: string; icon: ToolIconName }[] = [
@@ -43,7 +44,19 @@ const tools: { id: EditorTool; label: string; icon: ToolIconName }[] = [
   { id: 'text', label: 'Text', icon: 'text' },
   { id: 'fill', label: 'Fill shape', icon: 'fill' }, { id: 'eyedropper', label: 'Pick appearance', icon: 'eye' },
 ];
+// ponytail: the eraser borrows the shared "remove" tool icon until core/assets gains an eraser.
+const brushTools: { id: EditorTool; label: string; icon: ReactNode }[] = [
+  { id: 'brush', label: 'Brush', icon: <AetherIcon name="brush" /> }, { id: 'eraser', label: 'Eraser', icon: <ToolIcon name="remove" /> },
+];
 type BoardTool = 'note' | 'textbox' | 'table' | 'connector';
+const EXPORTS = [
+  { id: 'export', label: 'Export SVG (Inkscape layers)', extension: 'svg', mime: 'image/svg+xml' }, { id: 'export-pdf', label: 'Export PDF', extension: 'pdf', mime: 'application/pdf' },
+  { id: 'export-png', label: 'Export PNG', extension: 'png', mime: 'image/png' }, { id: 'export-jpeg', label: 'Export JPEG', extension: 'jpg', mime: 'image/jpeg' },
+  { id: 'export-webp', label: 'Export WebP', extension: 'webp', mime: 'image/webp' }, { id: 'export-ora', label: 'Export OpenRaster (GIMP, Krita)', extension: 'ora', mime: 'image/openraster' },
+] as const;
+/** Deep zoom: 0.1% to 1,000,000%. Brush and eraser sizes are on screen, so zooming in and drawing adds finer detail.
+ * ponytail: ceiling set by the browser's float32 rendering; rebase coordinates near the camera to go further. */
+const ZOOM_LIMITS = { min: .001, max: 10000 };
 type AppTool = EditorTool | BoardTool;
 const boardTools: { id: BoardTool; label: string; icon: ReactNode }[] = [
   { id: 'note', label: 'Sticky note', icon: <AetherIcon name="notes" /> }, { id: 'textbox', label: 'Text box', icon: <AetherIcon name="text" /> },
@@ -81,7 +94,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [contour, setContour] = useState(0), [recoveryStatus, setRecoveryStatus] = useState(initial ? 'Recovered local draft' : '');
   const draftID = useRef(crypto.randomUUID()), flushRecovery = useRef<() => void>(()=>{});
   const svgFile = useRef<HTMLInputElement>(null);
-  const [sides, setSides] = useState(6);
+  const [sides, setSides] = useState(6), [brush, setBrush] = useState<BrushSettings>({ brushPx: 12, eraserPx: 32, taper: true });
   const [layerID, setLayerID] = useState(doc.layers[0].id), [selected, setSelected] = useState<string[]>([]), [node, setNode] = useState<NodeSelection | null>(null);
   const [notice, setNotice] = useState(''), [name, setName] = useState(initial?.name ?? 'Untitled'), [epoch, setEpoch] = useState(0);
   const [snap, setSnap] = useState<SnapSettings>({ enabled: true, grid: false, gridStepPx: 20, distancePx: 8 });
@@ -114,7 +127,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const chosenBoard = board.filter(i => boardSelection.includes(i.id));
   const artboard = { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
   const drawn = pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths));
-  const contentBounds = drawn ? { x: Math.min(0, drawn.x), y: Math.min(0, drawn.y), width: Math.max(doc.widthPx, drawn.x + drawn.width) - Math.min(0, drawn.x), height: Math.max(doc.heightPx, drawn.y + drawn.height) - Math.min(0, drawn.y) } : artboard;
+  const contentBounds = doc.infinite ? drawn ?? artboard : drawn ? { x: Math.min(0, drawn.x), y: Math.min(0, drawn.y), width: Math.max(doc.widthPx, drawn.x + drawn.width) - Math.min(0, drawn.x), height: Math.max(doc.heightPx, drawn.y + drawn.height) - Math.min(0, drawn.y) } : artboard;
   // Gallery-free storage rule: files become items here; images are embedded as data URLs, other files as named cards.
   const attach = async (files: File[], at: FreeformPoint) => {
     const added: FreeformItem[] = [];
@@ -161,32 +174,26 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const download = (text: string, filename: string, mime: string) => {
     const url = URL.createObjectURL(new Blob([text], { type: mime })), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  const exportPNG = async () => {
-    const url = URL.createObjectURL(new Blob([drawingSVG(doc)], { type: 'image/svg+xml' })), image = new Image();
+  /** Open formats only: SVG (Inkscape layers), PDF, PNG, JPEG, WebP and OpenRaster (GIMP, Krita). */
+  const exportAs = async (format: typeof EXPORTS[number]) => {
     try {
-      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
-      const scale = 2, canvas = document.createElement('canvas'); canvas.width = doc.widthPx * scale; canvas.height = doc.heightPx * scale;
-      const context = canvas.getContext('2d'); if (!context) throw new Error('PNG export is unavailable in this browser.');
-      context.scale(scale, scale); context.drawImage(image, 0, 0, doc.widthPx, doc.heightPx);
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
-      if (!blob) throw new Error('PNG export failed.');
-      const png = URL.createObjectURL(blob), a = document.createElement('a'); a.href = png; a.download = `${name}.png`; a.click(); window.setTimeout(() => URL.revokeObjectURL(png), 1000);
-      setNotice('Artboard exported as PNG at 2×.');
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'PNG export failed.'); } finally { URL.revokeObjectURL(url); }
+      const data = format.id === 'export' ? new Blob([drawingSVG(doc)], { type: format.mime }) : format.id === 'export-pdf' ? new Blob([drawingPDF(doc) as BlobPart], { type: format.mime })
+        : format.id === 'export-ora' ? new Blob([await drawingOpenRaster(doc) as BlobPart], { type: format.mime }) : await rasterBlob(doc, format.mime as 'image/png' | 'image/jpeg' | 'image/webp');
+      const url = URL.createObjectURL(data), a = document.createElement('a'); a.href = url; a.download = `${name}.${format.extension}`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`${doc.infinite ? 'Drawing' : 'Artboard'} exported as ${format.extension.toUpperCase()}.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Export failed.'); }
   };
   const save = () => { const text = serializeDocument(doc); download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
-  const exportSVG = () => {
-    download(drawingSVG(doc), `${name}.svg`, 'image/svg+xml'); setNotice('Vector SVG exported.');
-  };
   const editCommand = (id: string) => {
-    if (tools.some(t => t.id === id) || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
+    const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
+    if (id === 'artboard') { commit(d => ({ ...d, infinite: !d.infinite })); return; }
+    if (tools.some(t => t.id === id) || brushTools.some(t => t.id === id) || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
     if (id === 'image') { imageFile.current?.click(); return; }
     if (id === 'fit') { canvasController.current?.fit(); return; }
     if (id === 'zoom-100') { canvasController.current?.zoomTo(1); return; }
-    if (id === 'export-png') { void exportPNG(); return; }
     if (disabled) return;
     const align = ALIGN.find(a => `align-${a.id}` === id), order = ORDER.find(o => `order-${o.id}` === id);
-    if (align) replace(alignPaths(chosen, align.id, artboard));
+    if (align) replace(alignPaths(chosen, align.id, doc.infinite ? pathBounds(chosen) ?? artboard : artboard));
     if (id === 'distribute-horizontal' || id === 'distribute-vertical') replace(distributePaths(chosen, id === 'distribute-horizontal' ? 'horizontal' : 'vertical'));
     if (id === 'flip-horizontal' || id === 'flip-vertical') replace(flipPaths(chosen, id === 'flip-horizontal' ? 'horizontal' : 'vertical'));
     if (id === 'rotate-90') replace(rotatePaths(chosen, Math.PI / 2));
@@ -198,11 +205,12 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const newDrawing=()=>{void beginDocument().then(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
   const fileActions = <MenuButton label="Document controls" items={[
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
-        {id:'import',label:'Import SVG…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},{id:'export',label:'Export SVG',icon:<AetherIcon name="export"/>},{id:'export-png',label:'Export PNG (2×)',icon:<AetherIcon name="image"/>},
+        {id:'import',label:'Import SVG…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},...EXPORTS.map(f=>({id:f.id,label:f.label,icon:<AetherIcon name="export"/>})),
         {id:'undo',label:'Undo',disabled:!history.canUndo,separatorBefore:true},{id:'redo',label:'Redo',disabled:!history.canRedo},
-      ]} onSelect={id=>{if(id==='new')newDrawing();else if(id==='open')file.current?.click();else if(id==='import')svgFile.current?.click();else if(id==='save')save();else if(id==='export')exportSVG();else if(id==='export-png')void exportPNG();else if(id==='undo')undo();else if(id==='redo')redo();}}><AetherIcon name="menu"/></MenuButton>;
+      ]} onSelect={id=>{if(id==='new')newDrawing();else if(id==='open')file.current?.click();else if(id==='import')svgFile.current?.click();else if(id==='save')save();else if(id==='undo')undo();else if(id==='redo')redo();}}><AetherIcon name="menu"/></MenuButton>;
   const searchCommands = [
     ...tools.map(t => ({ id: t.id, label: t.label, category: 'Draw', icon: <ToolIcon name={t.icon} /> })),
+    ...brushTools.map(t => ({ id: t.id, label: t.label, category: 'Draw', icon: t.icon })),
     ...boardTools.map(t => ({ id: t.id, label: t.label, category: 'Board', icon: t.icon })),
     { id: 'image', label: 'Add image or file…', category: 'Board' },
     ...ALIGN.map(a => ({ id: `align-${a.id}`, label: a.label, category: 'Arrange', disabled: !chosen.length })),
@@ -214,10 +222,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'rotate-90', label: 'Rotate 90°', category: 'Arrange', disabled: !chosen.length },
     { id: 'group', label: 'Group', category: 'Arrange', disabled: selected.length < 2 }, { id: 'ungroup', label: 'Ungroup', category: 'Arrange' },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
-    { id: 'save', label: 'Save drawing', category: 'File' }, { id: 'export', label: 'Export SVG', category: 'File' }, { id: 'export-png', label: 'Export PNG (2×)', category: 'File' },
+    { id: 'save', label: 'Save drawing', category: 'File' }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
+    { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
     { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
   ];
-  const runCommand = (id: string) => { if (id === 'open') file.current?.click(); else if (id === 'save') save(); else if (id === 'export') exportSVG(); else if (id === 'import') svgFile.current?.click(); else if (id === 'undo') undo(); else if (id === 'redo') redo(); else editCommand(id); };
+  const runCommand = (id: string) => { if (id === 'open') file.current?.click(); else if (id === 'save') save(); else if (id === 'import') svgFile.current?.click(); else if (id === 'undo') undo(); else if (id === 'redo') redo(); else editCommand(id); };
   const boardKeys = (e: KeyboardEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (e.defaultPrevented || target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
@@ -278,6 +287,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       { id: 'draw', label: 'Draw', groups: [
         { id: 'select', label: 'Select', tools: tools.slice(0, 2).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
         { id: 'draw', label: 'Draw', tools: tools.slice(2, 7).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
+        { id: 'brush', label: 'Brush', tools: brushTools.map(t => ({ ...t, active: tool === t.id })) },
         { id: 'paths', label: 'Paths', tools: tools.slice(7, 10).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
         { id: 'paint', label: 'Vector paint', tools: tools.slice(10).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
       ] },
@@ -322,9 +332,17 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         inspector: <SelectionInspector paths={chosen} board={chosenBoard} layer={layer} />,
         properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
           onDelete={() => { changeBoard(board.filter(i => !boardSelection.includes(i.id) && !(i.kind === 'connector' && (boardSelection.includes(i.from ?? '') || boardSelection.includes(i.to ?? ''))))); setBoardSelection([]); }} />}
-        <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<strong>{tools.find(t => t.id === tool)?.label ?? boardTools.find(t => t.id === tool)?.label}</strong>
+        <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<strong>{tools.find(t => t.id === tool)?.label ?? brushTools.find(t => t.id === tool)?.label ?? boardTools.find(t => t.id === tool)?.label}</strong>
+          {tool === 'brush' && <><FieldRow label="Size"><Slider min={1} max={200} value={brush.brushPx} unit="px" onChange={brushPx => setBrush(b => ({ ...b, brushPx }))} ariaLabel="Brush size" /></FieldRow>
+            <FieldRow label="Ends"><Checkbox label="Taper" checked={brush.taper} onChange={event => setBrush(b => ({ ...b, taper: event.target.checked }))} /></FieldRow></>}
+          {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
           {tool === 'polygon' && <FieldRow label="Sides"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
-          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div></div>,
+          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
+        <div className="sketch-layer-settings"><strong>Layer · {layer.name}</strong>
+          <FieldRow label="Opacity"><Slider min={0} max={100} unit="%" value={Math.round((layer.opacity ?? 1) * 100)} disabled={layer.locked} ariaLabel="Layer opacity"
+            onChange={value => changeLayer(l => ({ ...l, opacity: value / 100 }))} /></FieldRow>
+          <FieldRow label="Blend"><SelectField aria-label="Layer blend mode" value={layer.blend ?? 'normal'} disabled={layer.locked} options={BLEND_MODES.map(value => ({ value, label: value.replace('-', ' ') }))}
+            onChange={event => { const blend = event.target.value as BlendMode; changeLayer(l => ({ ...l, blend: blend === 'normal' ? undefined : blend })); }} /></FieldRow></div></div>,
         appearance: <div className="sketch-properties"><VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
             inside={!!insideID} onInside={() => { setInsideID(insideID ? null : chosen[0]?.id ?? null); chooseTool('paint'); }}
             onChange={patch => { setPaint(p => ({ ...p, ...patch })); setStyle(patch); }}
@@ -336,18 +354,19 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
         windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
-          { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, { id: 'export', label: 'Export SVG', icon: <AetherIcon name="export" /> }, { id: 'export-png', label: 'Export PNG (2×)', icon: <AetherIcon name="export" /> }] }}
+          { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, icon: <AetherIcon name="export" /> }))] }}
       environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
         actions: [{ id: 'fit', label: 'Zoom to fit', icon: <AetherIcon name="fit" /> }, { id: 'zoom-100', label: 'Zoom to 100%', icon: <AetherIcon name="zoom-in" /> },
           { id: 'grid', label: 'Dot grid', icon: <AetherIcon name="grid-dots" />, pressed: boardGrid }, { id: 'connectors', label: 'Show connectors', icon: <ToolIcon name="connector" />, pressed: boardConnectors },
-          { id: 'snap', label: 'Snapping', icon: <AetherIcon name="timeline-snap" />, pressed: snap.enabled }] }}>
+          { id: 'snap', label: 'Snapping', icon: <AetherIcon name="timeline-snap" />, pressed: snap.enabled },
+          { id: 'artboard', label: 'Artboard', icon: <AetherIcon name="rectangle-dashed" />, pressed: !doc.infinite }] }}>
       <div className="sketch-board" onKeyDown={boardKeys}>
-        <FreeformCanvas aria-label="Sketch board" hud={false} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
+        <FreeformCanvas aria-label="Sketch board" hud={false} zoomLimits={ZOOM_LIMITS} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
           selection={boardSelection} onSelectionChange={selectBoard} onUndo={undo} onRedo={redo} tools={[]} controllerRef={canvasController}
           tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' ? 'select' : `vector:${tool}`} hostTools={HOST_TOOLS}
           onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom })}
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
-          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides}
+          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add([path])} onSplice={splice}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>

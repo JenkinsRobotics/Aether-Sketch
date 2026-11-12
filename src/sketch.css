@@ -52,3 +52,7 @@ html, body, #root { height: 100%; margin: 0; }
 
 .sketch-recovery-status { font-size: 11px; color: var(--aether-color-text-dim); white-space: nowrap; }
 @media (max-width: 900px) { .sketch-recovery-status { display: none; } }
+/* Brush and eraser strokes while drawing: the brush shows its real fill, the eraser a translucent swath. */
+.sketch-brush-preview { stroke: none; }
+.sketch-eraser-preview { fill: var(--aether-color-accent); fill-opacity: .25; stroke: var(--aether-color-accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.sketch-layer-settings { display: grid; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--aether-color-border); }

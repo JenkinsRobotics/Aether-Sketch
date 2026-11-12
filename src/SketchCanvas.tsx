@@ -12,10 +12,13 @@ import { pathContours, replaceContour, beginDraft, moveDraft, endDraft, finishPe
 import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pathVisible, pathLocked, rootGroup, groupPaths } from './structure';
 import type { NodeSelection, SnapSettings } from './VectorInspector';
-export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper';
+import { brushOutline, eraseWith, type BrushSample } from './brush';
+export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser';
+/** Brush and eraser settings: size in document px; taper thins both ends of a brush stroke. */
+export interface BrushSettings { brushPx: number; eraserPx: number; taper: boolean }
 interface Props {
   contour: number; resetKey: string; doc: SketchDocument; layer: Layer | undefined; tool: EditorTool; onTool: (tool: EditorTool) => void;
-  paint: PaintStyle; polygonSides: number; onFill: (path: DrawingPath) => void; onPickPaint: (path: DrawingPath) => void;
+  paint: PaintStyle; polygonSides: number; brush: BrushSettings; onFill: (path: DrawingPath) => void; onPickPaint: (path: DrawingPath) => void;
   selected: string[]; onSelect: (ids: string[]) => void; node: NodeSelection | null; onNode: (node: NodeSelection | null) => void;
   snap: SnapSettings; onAdd: (path: DrawingPath) => void; onReplace: (paths: DrawingPath[]) => void;
   onSplice: (ids: string[], paths: DrawingPath[]) => void; onDelete: () => void; undo: () => void; redo: () => void;
@@ -23,7 +26,10 @@ interface Props {
 type Drag = { origin: Point; paths: DrawingPath[]; node?: number; control?: 'c1' | 'c2'; handle?: ResizeHandle | 'rotate'; bounds: Bounds; anchor: Point };
 export function SketchCanvas(props: Props) {
   const svg = useRef<SVGSVGElement>(null), activePointer = useRef<number | null>(null);
-  const draftRef = useRef<Draft | null>(null), drag = useRef<Drag | null>(null);
+  const draftRef = useRef<Draft | null>(null), drag = useRef<Drag | null>(null), stroke = useRef<{ samples: BrushSample[]; pen: boolean } | null>(null);
+  const brushing = props.tool === 'brush' || props.tool === 'eraser';
+  const sample = (e: { pressure: number; timeStamp: number }, at: Point) => stroke.current?.samples.push({ point: at, pressure: e.pressure || .5, timeMs: e.timeStamp });
+  const strokeOutline = () => stroke.current ? brushOutline(stroke.current.samples, { sizePx: (props.tool === 'eraser' ? props.brush.eraserPx : props.brush.brushPx) / scale(), taper: props.tool === 'brush' && props.brush.taper, pen: stroke.current.pen }) : [];
   const box = useRef<{ origin: Point; previous: string[] } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null), [preview, setPreview] = useState<DrawingPath[]>([]);
   const [marquee, setMarquee] = useState<Bounds | null>(null), [guides, setGuides] = useState<SnapGuide[]>([]);
@@ -42,7 +48,7 @@ export function SketchCanvas(props: Props) {
   const snap = (at: Point, alt: boolean, exclude: string[] = [], omitNode?: number) => {
     const targets = props.doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p) && !exclude.includes(p.id)).flatMap(pathSnapTargets));
     if (omitNode !== undefined && selected) targets.push(...selected.points.filter((_, i) => i !== omitNode).map(point => ({ point, label: 'Anchor' })));
-    targets.push({ point: [0, 0], label: 'Origin' }, { point: [props.doc.widthPx / 2, props.doc.heightPx / 2], label: 'Artboard center' }, ...([[props.doc.widthPx, 0], [0, props.doc.heightPx], [props.doc.widthPx, props.doc.heightPx]] as Point[]).map(point => ({ point, label: 'Artboard corner' })));
+    if (!props.doc.infinite) targets.push({ point: [0, 0], label: 'Origin' }, { point: [props.doc.widthPx / 2, props.doc.heightPx / 2], label: 'Artboard center' }, ...([[props.doc.widthPx, 0], [0, props.doc.heightPx], [props.doc.widthPx, props.doc.heightPx]] as Point[]).map(point => ({ point, label: 'Artboard corner' })));
     if (draftRef.current?.tool === 'pen') targets.push(...draftRef.current.points.map(point => ({ point, label: 'Anchor' })));
     const result = snapPoint(at, targets, { tolerance: props.snap.distancePx / scale(), gridStep: props.snap.grid ? props.snap.gridStepPx : undefined, bypass: !props.snap.enabled || alt });
     setGuides(result.guides); return result.point;
@@ -65,6 +71,7 @@ export function SketchCanvas(props: Props) {
     activePointer.current = e.pointerId; e.currentTarget.setPointerCapture(e.pointerId);
     if (!canEdit) return;
     const at = point(e), target = e.target as SVGElement;
+    if (props.tool === 'brush' || props.tool === 'eraser') { stroke.current = { samples: [], pen: e.pointerType === 'pen' }; sample(e, at); updateDraft(beginDraft('paint', at, false, options())); return; }
     if (props.tool === 'text') { const text=newText(snap(at,e.altKey)); props.onAdd(text);props.onSelect([text.id]);props.onTool('select');return; }
     if (props.tool === 'fill' || props.tool === 'eyedropper') {
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
@@ -139,6 +146,7 @@ export function SketchCanvas(props: Props) {
     else if (drag.current) setPreview(isDrag(drag.current, e) ? dragged(drag.current, e) : []);
     else if (draftRef.current) {
       const d = draftRef.current, target = d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? at : snap(at, e.altKey);
+      if (stroke.current) for (const c of e.nativeEvent.getCoalescedEvents?.() ?? [e.nativeEvent]) sample(c, point(c));
       updateDraft(moveDraft(d, target, e.shiftKey));
     }
   };
@@ -148,19 +156,29 @@ export function SketchCanvas(props: Props) {
       if (marquee) props.onSelect([...new Set([...box.current.previous, ...editable.filter(p => { const b = pathBounds([p]); return b && boundsContain(marquee, b); }).map(p => p.id)])]);
       box.current = null; setMarquee(null);
     } else if (drag.current) { if (isDrag(drag.current, e)) props.onReplace(dragged(drag.current, e)); drag.current = null; setPreview([]); }
+    else if (draftRef.current && stroke.current) {
+      const outline = strokeOutline(); stroke.current = null; updateDraft(null);
+      if (props.tool === 'brush' && outline.length > 2) {
+        const path: DrawingPath = { ...props.paint, id: crypto.randomUUID(), name: 'Brush stroke', points: outline, closed: true, fill: props.paint.color, fillGradient: undefined, fillOpacity: props.paint.strokeOpacity ?? 1, strokeEnabled: false };
+        props.onAdd(path); props.onSelect([]);
+      } else if (props.tool === 'eraser') { const { ids, next } = eraseWith(editable, outline, .5 / scale()); if (ids.length) props.onSplice(ids, next); }
+    }
     else if (draftRef.current) {
       const d = draftRef.current, raw = point(e), at = d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? raw : snap(raw, e.altKey);
       settle(endDraft(d, at, e.shiftKey));
     }
     setGuides([]); activePointer.current = null; e.currentTarget.releasePointerCapture(e.pointerId);
   };
-  const cancel = () => { activePointer.current = null; drag.current = null; box.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
+  const cancel = () => { stroke.current = null; activePointer.current = null; drag.current = null; box.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
   useEffect(() => { cancel(); }, [props.resetKey]);
   const key = (e: KeyboardEvent<SVGSVGElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); cancel(); e.shiftKey ? props.redo() : props.undo(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); props.onSelect(editable.map(p => p.id)); return; }
     if (e.key === 'Escape') { cancel(); return; }
     if (e.key === 'Enter' && draftRef.current) { e.preventDefault(); settle(finishPen(draftRef.current, e.shiftKey)); return; }
+    // B brush, Shift+B pencil, Shift+E eraser (Illustrator's keys where they do not clash with the engine's).
+    const own: EditorTool | undefined = e.key.toLowerCase() === 'b' ? (e.shiftKey ? 'paint' : 'brush') : e.shiftKey && e.key.toLowerCase() === 'e' ? 'eraser' : undefined;
+    if (!e.metaKey && !e.ctrlKey && !e.altKey && own) { e.preventDefault(); cancel(); props.onTool(own); return; }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && TOOL_SHORTCUTS[e.key.toLowerCase()]) { e.preventDefault(); cancel(); props.onTool(TOOL_SHORTCUTS[e.key.toLowerCase()]); return; }
     if (!canEdit || !shown.length) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -198,9 +216,9 @@ export function SketchCanvas(props: Props) {
       <defs><pattern id="sketch-grid" width={props.snap.gridStepPx} height={props.snap.gridStepPx} patternUnits="userSpaceOnUse"><path d={`M${props.snap.gridStepPx} 0 H0 V${props.snap.gridStepPx}`} fill="none" stroke="#dce2e8" strokeWidth={1 / scale()} /></pattern></defs>
       <PaintDefinitions doc={props.doc} ids={ids} preview={preview} />
       <rect className="sketch-capture" x={-5e6} y={-5e6} width={1e7} height={1e7} fill="transparent" />
-      <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />
-      {props.snap.grid && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
-      {[...props.doc.layers].reverse().filter(l => l.visible).map(l => <g key={l.id} data-layer-id={l.id} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none' }}>
+      {!props.doc.infinite && <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />}
+      {props.snap.grid && !props.doc.infinite && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
+      {[...props.doc.layers].reverse().filter(l => l.visible).map(l => <g key={l.id} data-layer-id={l.id} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none', opacity: l.opacity, mixBlendMode: l.blend }}>
         {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p; const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
           {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(path, `${ids.get(p.id)}-gradient`)} />}
           <path d={pathData(path)} fill={path.text ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale())} />
@@ -210,7 +228,8 @@ export function SketchCanvas(props: Props) {
         })}
       </g>)}
       {marquee && <rect {...marquee} className="sketch-marquee" pointerEvents="none" vectorEffect="non-scaling-stroke" />}
-      {draft && <polyline className="sketch-draft" points={(draft.tool === 'paint' ? draft.points : previewShape(draft)).map(p => p.join(',')).join(' ')} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+      {draft && brushing && <path className={`sketch-brush-preview${props.tool === 'eraser' ? ' sketch-eraser-preview' : ''}`} d={`M${strokeOutline().map(p => p.join(',')).join('L')}Z`} fill={props.tool === 'brush' ? props.paint.color : undefined} pointerEvents="none" />}
+      {draft && !brushing && <polyline className="sketch-draft" points={(draft.tool === 'paint' ? draft.points : previewShape(draft)).map(p => p.join(',')).join(' ')} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
       {guides.map((g, i) => <g className="sketch-snap-guide" key={i} pointerEvents="none" aria-label={`Snap ${g.label}`}><line x1={g.from[0]} y1={g.from[1]} x2={g.to[0]} y2={g.to[1]} vectorEffect="non-scaling-stroke" /><circle cx={g.to[0]} cy={g.to[1]} r={pin * 1.5} vectorEffect="non-scaling-stroke" /><text x={g.to[0] + pin * 2} y={g.to[1] - pin * 2} fontSize={11 / scale()}>{g.label}</text></g>)}
       {draft?.tangents?.map((t, i) => { const p = draft.points[i]; return <g key={i} className="sketch-tangent" pointerEvents="none"><line x1={p[0] - t[0]} y1={p[1] - t[1]} x2={p[0] + t[0]} y2={p[1] + t[1]} vectorEffect="non-scaling-stroke" /><circle cx={p[0] + t[0]} cy={p[1] + t[1]} r={pin} /></g>; })}
       {bounds && canEdit && props.tool === 'select' && <g className="sketch-nodes" aria-label="Selection transform">

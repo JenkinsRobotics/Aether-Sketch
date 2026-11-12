@@ -3,11 +3,16 @@ import { readBoard, type BoardItem } from './board';
 import { isVectorGradient, type VectorAppearance, type SketchPath } from '@aether/sketch';
 export interface DrawingPath extends SketchPath, VectorAppearance { text?: VectorText; fillOpen?: boolean; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
 export interface PathGroup { clipPathID?: string; id: string; name: string; parentID?: string; hidden?: boolean; locked?: boolean }
-export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[] }
-/** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none. */
-export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[] }
+/** Layer blend modes: the names CSS, SVG, OpenRaster (as svg:…) and PDF (capitalised) share. */
+export const BLEND_MODES = ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'] as const;
+export type BlendMode = typeof BLEND_MODES[number];
+/** `opacity` (0–1) and `blend` are optional; absent means 1 and normal. */
+export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode }
+/** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none.
+ * `infinite` drawings have no artboard: exports frame whatever is drawn. Older drawings keep their artboard. */
+export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean }
 export function newLayer(name: string): Layer { return { id: crypto.randomUUID(), name, visible: true, locked: false, paths: [] }; }
-export function newDocument(): SketchDocument { return { format: 'aethersketch', version: 2, widthPx: 1200, heightPx: 800, layers: [newLayer('Layer 1')] }; }
+export function newDocument(): SketchDocument { return { format: 'aethersketch', version: 2, widthPx: 1200, heightPx: 800, infinite: true, layers: [newLayer('Layer 1')] }; }
 export const serializeDocument = (doc: SketchDocument) => JSON.stringify(doc, null, 2);
 
 /** Reject unsupported documents before replacing the current drawing. No executable SVG is loaded. */
@@ -21,6 +26,7 @@ export function readDocument(text: string): SketchDocument {
   const id = (v: unknown) => { check(typeof v === 'string' && v.length > 0 && v.length <= 100 && !ids.has(v)); ids.add(v as string); };
   check(doc?.format === 'aethersketch' && [1, 2].includes(doc.version) && number(doc.widthPx, 1, 16384) && number(doc.heightPx, 1, 16384));
   check(Array.isArray(doc.layers) && doc.layers.length > 0 && doc.layers.length <= 500);
+  check(doc.infinite === undefined || typeof doc.infinite === 'boolean');
   let vertices = 0;
   const geometry = (p: SketchPath, child = false) => {
     check(p && typeof p === 'object');
@@ -39,6 +45,7 @@ export function readDocument(text: string): SketchDocument {
     check(layer && typeof layer === 'object'); id(layer.id);
     check(typeof layer.name === 'string' && layer.name.length <= 200 && typeof layer.visible === 'boolean' && typeof layer.locked === 'boolean');
     check(Array.isArray(layer.paths) && layer.paths.length <= 10000);
+    check(layer.opacity === undefined || number(layer.opacity, 0, 1)); check(layer.blend === undefined || BLEND_MODES.includes(layer.blend));
     check(layer.groups === undefined || (Array.isArray(layer.groups) && layer.groups.length <= 10000));
     for (const group of layer.groups ?? []) { check(group && typeof group === 'object'); id(group.id); check(typeof group.name === 'string' && group.name.length <= 200); }
     const groups = new Map<string, PathGroup>((layer.groups ?? []).map((g: PathGroup) => [g.id, g]));
