@@ -3,7 +3,7 @@ import { beforeAll, expect, it } from 'vitest';
 import { crc32, drawingPDF, rasterSize, storedZip } from './export';
 import { drawingSVG, exportArea } from './paint';
 import { newDocument, newLayer, readDocument, serializeDocument } from './document';
-import { sampleCarSketch } from './sample';
+import { SAMPLES, sampleCarSketch } from './sample';
 import { importSVG } from './svg-import';
 
 // jsdom has no canvas; the importer falls back to its default colours.
@@ -53,6 +53,19 @@ it('round-trips layers through SVG: name, hidden state, opacity and blend come b
 
 it('the sample car sketch is a valid drawing on blended layers', () => {
   const doc = sampleCarSketch();
-  expect(readDocument(serializeDocument(doc)).layers.map(l => l.name)).toEqual(['Highlights', 'Line art', 'Wheels', 'Body colour', 'Ground shadow']);
+  expect(readDocument(serializeDocument(doc)).layers.map(l => l.name)).toEqual(['Highlights', 'Line art', 'Body colour', 'Wheels', 'Ground shadow', 'Construction']);
   expect(doc.layers[0].blend).toBe('screen'); expect(doc.layers.flatMap(l => l.paths).some(p => p.blurPx)).toBe(true);
+});
+
+it('every sample is a valid drawing whose filled paint stays inside the page', () => {
+  for (const sample of SAMPLES) {
+    const doc = readDocument(serializeDocument(sample.make()));
+    expect(doc.layers.length).toBeGreaterThan(2);
+    for (const p of doc.layers.flatMap(l => l.paths)) for (const [x, y] of p.points) { expect(x).toBeGreaterThan(-400); expect(x).toBeLessThan(doc.widthPx + 400); expect(y).toBeGreaterThan(-400); expect(y).toBeLessThan(doc.heightPx + 400); }
+  }
+});
+it('blur filter regions reach three standard deviations past the shape on every side', () => {
+  const filters = [...drawingSVG(sampleCarSketch()).matchAll(/<filter [^>]*width="([\d.e+-]+)" height="([\d.e+-]+)"><feGaussianBlur stdDeviation="([\d.e+-]+)"/g)];
+  expect(filters.length).toBeGreaterThan(0);
+  for (const [, w, h, sd] of filters) { expect(+w).toBeGreaterThanOrEqual(6 * +sd); expect(+h).toBeGreaterThanOrEqual(6 * +sd); }
 });

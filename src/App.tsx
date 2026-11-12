@@ -31,7 +31,7 @@ import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG
 import { drawingOpenRaster, drawingPDF, rasterBlob } from './export';
 import { BRUSH_PRESETS } from './brush';
 import { BrushPanel } from './BrushPanel';
-import { sampleCarSketch } from './sample';
+import { SAMPLES } from './sample';
 import { ColourPanel } from './ColourPanel';
 import { GuidePanel } from './GuidePanel';
 import { symmetryCopies, type Guides } from './guides';
@@ -223,7 +223,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const save = () => { const text = serializeDocument(doc); download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
   const editCommand = (id: string) => {
     const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
-    if (id === 'sample-car') { openSample(); return; }
+    const sample = SAMPLES.find(x => x.id === id); if (sample) { openSample(sample); return; }
     if (id === 'artboard') { commit(d => ({ ...d, infinite: !d.infinite })); return; }
     if (id in TOOL_INFO || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
     if (id.startsWith('guide-')) { toggleGuide(id.slice(6)); return; }
@@ -241,7 +241,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (id === 'ungroup') changeLayer(l => ungroupSelection(l, selected));
     if (id === 'delete') remove();
   };
-  const openSample=()=>{void beginDocument().then(()=>{history.open(sampleCarSketch());setName('Car sketch sample');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);setTimeout(()=>canvasController.current?.fit(),0);}).catch(e=>setNotice(e.message));};
+  const openSample=(sample: typeof SAMPLES[number])=>{void beginDocument().then(()=>{history.open(sample.make());setName(sample.name);setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);setTimeout(()=>canvasController.current?.fit(),0);}).catch(e=>setNotice(e.message));};
   const newDrawing=()=>{void beginDocument().then(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
   const fileActions = <MenuButton label="Document controls" items={[
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
@@ -262,7 +262,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'rotate-90', label: 'Rotate 90°', category: 'Arrange', disabled: !chosen.length },
     { id: 'group', label: 'Group', category: 'Arrange', disabled: selected.length < 2 }, { id: 'ungroup', label: 'Ungroup', category: 'Arrange' },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
-    { id: 'save', label: 'Save drawing', category: 'File' }, { id: 'sample-car', label: 'New sample: car sketch', category: 'File' }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
+    { id: 'save', label: 'Save drawing', category: 'File' }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, category: 'File' })), ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
     { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
   ];
@@ -383,7 +383,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
         toggles: GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, icon: g.icon, pressed: g.id === 'steady' ? guides.steady !== undefined : !!guides[g.id] })),
-        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, { id: 'sample-car', label: 'New sample: car sketch', icon: <AetherIcon name="sparkles" /> }, { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
+        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, icon: <AetherIcon name="sparkles" /> })), { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
           { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, icon: <AetherIcon name="export" /> }))] }}
       environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
         actions: [{ id: 'board', label: 'Board: notes, text boxes, tables, connectors, images', icon: <AetherIcon name="notes" />, pressed: isBoardTool(tool),

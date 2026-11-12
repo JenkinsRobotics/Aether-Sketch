@@ -70,12 +70,17 @@ export function exportArea(doc: SketchDocument) {
   return { x, y, width: Math.max(drawn.width + margin * 2, 1e-6), height: Math.max(drawn.height + margin * 2, 1e-6) };
 }
 /** Standard SVG. Each layer is an Inkscape layer (name, hidden state, opacity, blend), so layers survive a round trip through Inkscape. */
+/** A blur's filter region in drawing units: the path's bounds plus three standard deviations, so soft edges are never cut off. */
+export function blurRegion(p: DrawingPath) {
+  const b = pathBounds([p]) ?? { x: 0, y: 0, width: 0, height: 0 }, pad = (p.blurPx ?? 0) * 3;
+  return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
+}
 export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string {
   const ids = paintIDs(doc), all = doc.layers.flatMap(l => l.paths);
   const defs = all.map(p => {
     const id = ids.get(p.id)!, g = p.fillGradient;
     const clip = `<clipPath id="${id}-clip" clipPathUnits="userSpaceOnUse"><path d="${pathData(p)}" clip-rule="${p.fillRule ?? 'nonzero'}"/></clipPath>`;
-    const blur = p.blurPx ? `<filter id="${id}-blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${p.blurPx}"/></filter>` : '';
+    const blur = p.blurPx ? `<filter id="${id}-blur" filterUnits="userSpaceOnUse" ${Object.entries(blurRegion(p)).map(([k, v]) => `${k}="${+v.toPrecision(10)}"`).join(' ')}><feGaussianBlur stdDeviation="${p.blurPx}"/></filter>` : '';
     if (!g) return clip + blur;
     const tag = g.kind === 'linear' ? 'linearGradient' : 'radialGradient';
     const position = g.kind === 'linear' ? Object.entries(gradientVector(g.angleDeg)).map(([k, v]) => `${k}="${v}"`).join(' ') : 'cx="0.5" cy="0.5" r="0.5"';
