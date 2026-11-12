@@ -64,7 +64,7 @@ const boardTools: { id: BoardTool; label: string; icon: ReactNode }[] = [
 ];
 // Board tools are FreeformCanvas's own; every vector tool except Select is handled by SketchCanvas in the canvas layer.
 const CANVAS_TOOL: Record<BoardTool, string> = { note: 'sticky', textbox: 'text', table: 'table', connector: 'connector' };
-const HOST_TOOLS = tools.filter(t => t.id !== 'select').map(t => `vector:${t.id}`);
+const HOST_TOOLS = [...tools, ...brushTools].filter(t => t.id !== 'select').map(t => `vector:${t.id}`);
 const isBoardTool = (tool: AppTool): tool is BoardTool => tool in CANVAS_TOOL;
 const ALIGN: { id: AlignMode; label: string }[] = [{ id: 'left', label: 'Align left' }, { id: 'center', label: 'Align horizontal centres' }, { id: 'right', label: 'Align right' },
   { id: 'top', label: 'Align top' }, { id: 'middle', label: 'Align vertical centres' }, { id: 'bottom', label: 'Align bottom' }];
