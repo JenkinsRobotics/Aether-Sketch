@@ -2,7 +2,8 @@
 import { beforeAll, expect, it } from 'vitest';
 import { crc32, drawingPDF, rasterSize, storedZip } from './export';
 import { drawingSVG, exportArea } from './paint';
-import { newDocument, newLayer } from './document';
+import { newDocument, newLayer, readDocument, serializeDocument } from './document';
+import { sampleCarSketch } from './sample';
 import { importSVG } from './svg-import';
 
 // jsdom has no canvas; the importer falls back to its default colours.
@@ -48,4 +49,10 @@ it('round-trips layers through SVG: name, hidden state, opacity and blend come b
   top.paths.push(square('b', 0)); doc.layers[0].paths.push(square('a', 20)); doc.layers.unshift(top);
   const back = importSVG(drawingSVG(doc)).doc;
   expect(back.layers.map(l => [l.name, l.visible, l.opacity, l.blend, l.paths.length])).toEqual([['Wash', false, .4, 'screen', 1], ['Layer 1', true, 1, undefined, 1]]);
+});
+
+it('the sample car sketch is a valid drawing on blended layers', () => {
+  const doc = sampleCarSketch();
+  expect(readDocument(serializeDocument(doc)).layers.map(l => l.name)).toEqual(['Highlights', 'Line art', 'Wheels', 'Body colour', 'Ground shadow']);
+  expect(doc.layers[0].blend).toBe('screen'); expect(doc.layers.flatMap(l => l.paths).some(p => p.blurPx)).toBe(true);
 });

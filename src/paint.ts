@@ -15,6 +15,7 @@ export function paintAttributes(p: DrawingPath, gradientID: string) {
     strokeOpacity: p.strokeOpacity ?? 1, opacity: p.opacity,
     strokeLinecap: p.lineCap ?? 'round', strokeLinejoin: p.lineJoin ?? 'round',
     strokeDasharray: strokeDash(p.dash, p.widthPx)?.join(' '),
+    filter: p.blurPx ? `url(#${gradientID.replace(/-gradient$/, '-blur')})` : undefined,
   };
 }
 export function clipPaths(layer: Layer, path: DrawingPath): DrawingPath[] {
@@ -74,10 +75,11 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string 
   const defs = all.map(p => {
     const id = ids.get(p.id)!, g = p.fillGradient;
     const clip = `<clipPath id="${id}-clip" clipPathUnits="userSpaceOnUse"><path d="${pathData(p)}" clip-rule="${p.fillRule ?? 'nonzero'}"/></clipPath>`;
-    if (!g) return clip;
+    const blur = p.blurPx ? `<filter id="${id}-blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${p.blurPx}"/></filter>` : '';
+    if (!g) return clip + blur;
     const tag = g.kind === 'linear' ? 'linearGradient' : 'radialGradient';
     const position = g.kind === 'linear' ? Object.entries(gradientVector(g.angleDeg)).map(([k, v]) => `${k}="${v}"`).join(' ') : 'cx="0.5" cy="0.5" r="0.5"';
-    return clip + `<${tag} id="${id}-gradient" ${position}>${g.stops.map(s => `<stop offset="${s.offset}" stop-color="${s.color}" stop-opacity="${s.opacity}"/>`).join('')}</${tag}>`;
+    return clip + blur + `<${tag} id="${id}-gradient" ${position}>${g.stops.map(s => `<stop offset="${s.offset}" stop-color="${s.color}" stop-opacity="${s.opacity}"/>`).join('')}</${tag}>`;
   }).join('');
   const body = [...doc.layers].reverse().map((l, index) => {
     const shown = { ...l, visible: true };

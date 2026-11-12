@@ -1,7 +1,8 @@
 import type { VectorText } from './text';
 import { readBoard, type BoardItem } from './board';
 import { isVectorGradient, type VectorAppearance, type SketchPath } from '@aether/sketch';
-export interface DrawingPath extends SketchPath, VectorAppearance { text?: VectorText; fillOpen?: boolean; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
+/** `blurPx` softens a path (airbrush, soft brushes): a Gaussian blur in document units. */
+export interface DrawingPath extends SketchPath, VectorAppearance { text?: VectorText; fillOpen?: boolean; blurPx?: number; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
 export interface PathGroup { clipPathID?: string; id: string; name: string; parentID?: string; hidden?: boolean; locked?: boolean }
 /** Layer blend modes: the names CSS, SVG, OpenRaster (as svg:…) and PDF (capitalised) share. */
 export const BLEND_MODES = ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'] as const;
@@ -69,7 +70,7 @@ export function readDocument(text: string): SketchDocument {
       check(path.lineJoin === undefined || ['miter', 'round', 'bevel'].includes(path.lineJoin));
       check(path.dash === undefined || ['solid', 'dashed', 'dotted'].includes(path.dash));
       check(typeof path.color === 'string' && /^#[\da-f]{6}$/i.test(path.color));
-      check(number(path.widthPx, .1, 200) && number(path.opacity, 0, 1));
+      check(number(path.widthPx, .1, 200) && number(path.opacity, 0, 1)); check(path.blurPx === undefined || number(path.blurPx, 0, 1e6));
       if (path.text !== undefined) {
         const t = path.text;
         check(t && typeof t === 'object' && path.points.length === 4 && !path.subpaths && !path.curves);

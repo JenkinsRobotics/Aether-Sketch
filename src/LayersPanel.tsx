@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { AetherIcon, TreePanel, type TreeNode } from '@aether/ui';
+import { memo, useState } from 'react';
+import { AetherIcon, IconButton, LayerStack, TreePanel, type TreeNode } from '@aether/ui';
+import { pathBounds, pathData } from '@aether/sketch';
 import { ancestors, canMergeDown, duplicateLayer, groupPaths, mergeDown, pathLocked, pathVisible, moveTreeItem } from './structure';
 import { newLayer, type SketchDocument, type Layer } from './document';
 import type { BoardItem } from './board';
@@ -13,6 +14,18 @@ const boardLabel = (item: BoardItem) => {
   return `${BOARD_LABEL[item.kind] ?? 'Item'}${text ? ` · ${text.slice(0, 40)}` : ''}`;
 };
 
+const VIEW_KEY = 'aether-sketch.layer-view';
+/** A layer's content drawn small, for the preview list. */
+const LayerThumbnail = memo(function LayerThumbnail({ layer }: { layer: Layer }) {
+  const shown = layer.paths.filter(p => pathVisible({ ...layer, visible: true }, p) && !p.text), b = pathBounds(shown);
+  if (!b) return <svg viewBox="0 0 4 3" />;
+  const pad = Math.max(b.width, b.height) * .06 || 1;
+  return <svg viewBox={`${b.x - pad} ${b.y - pad} ${b.width + pad * 2} ${b.height + pad * 2}`} preserveAspectRatio="xMidYMid meet">
+    {shown.map(p => <path key={p.id} d={pathData(p)} fill={(!p.closed && !p.fillOpen) || p.fill === null ? 'none' : p.fillGradient?.stops[0]?.color ?? p.fill ?? p.color}
+      fillOpacity={p.fillOpacity ?? (p.fill === undefined ? .15 : 1)} stroke={p.strokeEnabled === false ? 'none' : p.color} strokeWidth={p.widthPx} opacity={p.opacity} />)}
+  </svg>;
+});
+
 export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard }: {
   doc: SketchDocument; layer: Layer; selected: string[]; onSelect: (layerID: string, ids: string[]) => void;
   commit: (change: (doc: SketchDocument) => SketchDocument) => void;
@@ -20,6 +33,10 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
 }) {
   const board = (doc.board ?? []).filter(i => i.kind !== 'connector'), boardIDs = new Set(board.map(i => i.id));
   const [renaming, setRenaming] = useState<string | null>(null), [treeSelection, setTreeSelection] = useState<string | null>(null);
+  const [view, setView] = useState<'tree' | 'previews'>(() => { try { return localStorage.getItem(VIEW_KEY) === 'previews' ? 'previews' : 'tree'; } catch { return 'tree'; } });
+  const switchView = () => { const next = view === 'tree' ? 'previews' : 'tree'; setView(next); try { localStorage.setItem(VIEW_KEY, next); } catch { /* per-visit only */ } };
+  const footer = <div className="sketch-layer-footer"><IconButton label={view === 'tree' ? 'Show layer previews' : 'Show compact layer tree'} aria-pressed={view === 'previews'} onClick={switchView}>
+    <AetherIcon name={view === 'tree' ? 'image' : 'list-tree'} /></IconButton></div>;
   const locate = (id: string) => doc.layers.find(l => l.id === id || l.paths.some(p => p.id === id) || l.groups?.some(g => g.id === id));
   const command = (id: string, action: string, value?: string) => {
     if (id === BOARD_NODE || boardIDs.has(id)) { if (action === 'delete') onDeleteBoard?.(id === BOARD_NODE ? [...boardIDs] : [id]); return; }
@@ -67,7 +84,16 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
   const current = boardSelection.length ? boardSelection[0] : treeMatches ? treeSelection : selected[0] ?? layer.id;
   const highlighted = new Set(boardSelection.length ? boardSelection : selected.length ? selected : [layer.id]);
   if (treeMatches) highlighted.add(treeSelection);
-  return <TreePanel title="Layers" ariaLabel="Drawing layers" nodes={nodes} selectedIDs={highlighted}
+  const newLayerControl = { id: 'add', label: 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = newLayer(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } };
+  if (view === 'previews') return <LayerStack ariaLabel="Drawing layers" selectedID={layer.id} footer={footer} controls={[newLayerControl,
+      { id: 'duplicate', label: 'Duplicate layer', icon: <AetherIcon name="duplicate" />, onClick: () => command(layer.id, 'duplicate') },
+      { id: 'merge', label: 'Merge down', icon: <AetherIcon name="merge" />, disabled: !canMergeDown(doc, layer.id), onClick: () => command(layer.id, 'merge-down') },
+      { id: 'delete', label: 'Delete layer', icon: <AetherIcon name="delete" />, disabled: doc.layers.length <= 1 || layer.locked, onClick: () => command(layer.id, 'delete') }]}
+    layers={doc.layers.map(l => ({ id: l.id, label: l.name, visible: l.visible, locked: l.locked, thumbnail: <LayerThumbnail layer={l} />,
+      detail: [l.blend && l.blend !== 'normal' ? l.blend.replace('-', ' ') : '', (l.opacity ?? 1) < 1 ? `${Math.round((l.opacity ?? 1) * 100)}%` : '', `${l.paths.length} item${l.paths.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }))}
+    onSelect={id => onSelect(id, [])} onToggleVisible={id => command(id, 'visibility')} onToggleLock={id => command(id, 'lock')}
+    onMove={(source, target, position) => commit(d => moveTreeItem(d, source, target, position))} />;
+  return <TreePanel title="Layers" ariaLabel="Drawing layers" footer={footer} nodes={nodes} selectedIDs={highlighted}
     onSelect={ids => {
       const picked = ids.flatMap(id => id === BOARD_NODE ? [...boardIDs] : boardIDs.has(id) ? [id] : []);
       if (picked.length) { setTreeSelection(null); onSelectBoard?.(picked); return; }
@@ -79,7 +105,7 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     menuItems={id => id === BOARD_NODE || boardIDs.has(id) ? [{ id: 'delete', label: id === BOARD_NODE ? 'Delete all board items' : 'Delete' }] : [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' },
       ...(locate(id)?.id === id ? [{ id: 'duplicate', label: 'Duplicate layer' }, { id: 'merge-down', label: 'Merge down', disabled: !canMergeDown(doc, id) }] : []), { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
     onCommand={command} controls={[
-      { id: 'add', label: 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = newLayer(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } },
+      newLayerControl,
       { id: 'rename', label: 'Rename item', icon: <AetherIcon name="pencil" />, onClick: () => setRenaming(current), shortcut: 'F2' },
       { id: 'delete', label: 'Delete item', icon: <AetherIcon name="delete" />, onClick: () => command(current, 'delete'), shortcut: 'Delete' },
     ]} />;

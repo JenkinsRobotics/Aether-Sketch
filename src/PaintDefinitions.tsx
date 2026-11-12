@@ -7,6 +7,7 @@ export function PaintDefinitions({ doc, ids, preview }: { doc: SketchDocument; i
     return <g key={id}>
       <clipPath id={`${id}-clip`} clipPathUnits="userSpaceOnUse"><path d={pathData(p)} clipRule={p.fillRule ?? 'nonzero'} /></clipPath>
       {g?.kind === 'linear' && <linearGradient id={`${id}-gradient`} {...gradientVector(g.angleDeg)}>{stops}</linearGradient>}
+      {p.blurPx ? <filter id={`${id}-blur`} x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation={p.blurPx} /></filter> : null}
       {g?.kind === 'radial' && <radialGradient id={`${id}-gradient`} cx=".5" cy=".5" r=".5">{stops}</radialGradient>}
     </g>;
   })}</defs>;

@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { SketchPath } from '@aether/sketch';
-import { brushOutline, brushWidths, eraseWith, type BrushSample } from './brush';
+import { BRUSH_PRESETS, brushOpacity, brushOutline, brushWidths, eraseWith, type BrushSample } from './brush';
 
 const line = (n: number, pressure = (_i: number) => .5, msPerStep = 16): BrushSample[] =>
   Array.from({ length: n }, (_, i) => ({ point: [i * 4, 0], pressure: pressure(i), timeMs: i * msPerStep }));
@@ -39,4 +39,12 @@ test('the eraser cuts through closed shapes and leaves open strokes', () => {
   expect(all.some(x => x > 41 && x < 59)).toBe(false);
   // Erasing all of a small shape removes it.
   expect(eraseWith([{ id: 'dot', points: [[48, 48], [52, 48], [52, 52], [48, 52]] as [number, number][], closed: true }], swipe, .5)).toEqual({ ids: ['dot'], next: [] });
+});
+
+test('presets set the light-pressure width and the opacity range', () => {
+  const ink = brushWidths(line(30, () => 0), { sizePx: 10, taper: false, pen: true, minSize: .15 });
+  expect(ink[15]).toBeCloseTo(.15);
+  expect(brushOpacity({ opacity: 1, minOpacity: .2 }, line(5, () => 1))).toBeCloseTo(1);
+  expect(brushOpacity({ opacity: 1, minOpacity: .2 }, line(5, () => 0))).toBeCloseTo(.2);
+  expect(BRUSH_PRESETS.map(b => b.group)).toContain('Airbrush');
 });

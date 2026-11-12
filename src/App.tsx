@@ -23,31 +23,51 @@ import { SelectionInspector } from './SelectionInspector';
 import { createDocument } from './create-document';
 import { driveRequest, editorURL, encodeFile, fileIcon, fileType, type DriveFile } from '@aether/session/library/drive-api';
 import { STICKY_COLORS } from './board';
-import { AetherIcon, Checkbox, SelectField, ToolIcon, Slider, MenuButton, type ToolIconName } from '@aether/ui';
+import { AetherIcon, SelectField, ToolIcon, Slider, MenuButton } from '@aether/ui';
 import { SketchCanvas, type BrushSettings, type EditorTool } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
 import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, repairClips, type PaintStyle } from './paint';
 import { drawingOpenRaster, drawingPDF, rasterBlob } from './export';
+import { BRUSH_PRESETS } from './brush';
+import { BrushPanel } from './BrushPanel';
+import { sampleCarSketch } from './sample';
+import { ColourPanel } from './ColourPanel';
+import { GuidePanel } from './GuidePanel';
+import { symmetryCopies, type Guides } from './guides';
 import { ancestors } from './structure';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
 import { BLEND_MODES, readDocument, serializeDocument, newDocument, type BlendMode, type DrawingPath, type Layer } from './document';
 import { useDocument } from './useDocument';
 import './sketch.css';
-const tools: { id: EditorTool; label: string; icon: ToolIconName }[] = [
-  { id: 'select', label: 'Select', icon: 'select' }, { id: 'node', label: 'Edit nodes', icon: 'pen' },
-  { id: 'pen', label: 'Bézier pen', icon: 'curve' }, { id: 'line', label: 'Line', icon: 'line' },
-  { id: 'rect', label: 'Rectangle', icon: 'rectangle' }, { id: 'ellipse', label: 'Ellipse', icon: 'ellipse' },
-  { id: 'polygon', label: 'Polygon', icon: 'polygon' }, { id: 'paint', label: 'Pencil', icon: 'freehand' },
-  { id: 'freehand', label: 'Freehand shape', icon: 'freehand' }, { id: 'trim', label: 'Trim', icon: 'cut' },
-  { id: 'text', label: 'Text', icon: 'text' },
-  { id: 'fill', label: 'Fill shape', icon: 'fill' }, { id: 'eyedropper', label: 'Pick appearance', icon: 'eye' },
-];
+/** Every drawing tool, with a name and a recognisable icon. Keys: V select, H hand, Z zoom, B brush, Shift+B pencil,
+ * Shift+E eraser, N lasso fill, P pen, L line, M rectangle, E ellipse, G polygon, A edit nodes, Q lasso select. */
 // ponytail: the eraser borrows the shared "remove" tool icon until core/assets gains an eraser.
-const brushTools: { id: EditorTool; label: string; icon: ReactNode }[] = [
-  { id: 'brush', label: 'Brush', icon: <AetherIcon name="brush" /> }, { id: 'eraser', label: 'Eraser', icon: <ToolIcon name="remove" /> },
+const TOOL_INFO: Record<EditorTool, { label: string; icon: ReactNode }> = {
+  select: { label: 'Select and transform (V)', icon: <ToolIcon name="select" /> }, hand: { label: 'Hand: pan (H, or hold Space)', icon: <AetherIcon name="hand" /> },
+  zoom: { label: 'Zoom: click in, Alt-click out (Z)', icon: <AetherIcon name="zoom-in" /> },
+  brush: { label: 'Brush (B)', icon: <AetherIcon name="brush" /> }, paint: { label: 'Pencil (Shift+B)', icon: <AetherIcon name="pencil" /> }, eraser: { label: 'Eraser (Shift+E)', icon: <ToolIcon name="remove" /> },
+  fill: { label: 'Fill a shape', icon: <ToolIcon name="fill" /> }, freehand: { label: 'Lasso fill (N)', icon: <AetherIcon name="scribble" /> }, eyedropper: { label: 'Eyedropper: pick a colour and style', icon: <ToolIcon name="eye" /> },
+  line: { label: 'Line (L)', icon: <ToolIcon name="line" /> }, pen: { label: 'Pen: Bézier curves (P)', icon: <ToolIcon name="pen" /> },
+  rect: { label: 'Rectangle (M)', icon: <ToolIcon name="rectangle" /> }, square: { label: 'Square', icon: <ToolIcon name="rectangle" /> },
+  ellipse: { label: 'Ellipse (E)', icon: <AetherIcon name="circle" /> }, circle: { label: 'Circle', icon: <AetherIcon name="circle" /> },
+  polygon: { label: 'Polygon (G)', icon: <AetherIcon name="hexagon" /> }, star: { label: 'Star', icon: <AetherIcon name="star" /> }, text: { label: 'Text (T)', icon: <AetherIcon name="text" /> },
+  lasso: { label: 'Lasso select (Q)', icon: <AetherIcon name="lasso" /> }, node: { label: 'Edit nodes (A)', icon: <AetherIcon name="node-select" /> }, trim: { label: 'Trim at crossings', icon: <AetherIcon name="scissors" /> },
+};
+/** The tool bar's tabs: drawing first, then shapes, then editing. Guides live in the center tray, board items in the environment tray. */
+const TOOL_TABS: { id: string; label: string; groups: { id: string; label: string; tools: EditorTool[] }[] }[] = [
+  { id: 'draw', label: 'Draw', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'hand', 'zoom'] }, { id: 'brushes', label: 'Brushes', tools: ['brush', 'paint', 'eraser'] },
+    { id: 'colour', label: 'Fill and colour', tools: ['fill', 'freehand', 'eyedropper'] }] },
+  { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
+  { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
 ];
+const GUIDES: { id: 'ruler' | 'ellipse' | 'symmetry' | 'perspective' | 'steady'; label: string; icon: ReactNode }[] = [
+  { id: 'ruler', label: 'Ruler', icon: <AetherIcon name="ruler" /> }, { id: 'ellipse', label: 'Ellipse guide', icon: <AetherIcon name="circle-dashed" /> },
+  { id: 'symmetry', label: 'Symmetry', icon: <ToolIcon name="mirror" /> }, { id: 'perspective', label: 'Perspective guide', icon: <AetherIcon name="grid-cross" /> },
+  { id: 'steady', label: 'Steady stroke', icon: <AetherIcon name="scribble-variable" /> },
+];
+const DRAW_TOOLS = [...new Set(TOOL_TABS.flatMap(t => t.groups.flatMap(g => g.tools)))];
 type BoardTool = 'note' | 'textbox' | 'table' | 'connector';
 const EXPORTS = [
   { id: 'export', label: 'Export SVG (Inkscape layers)', extension: 'svg', mime: 'image/svg+xml' }, { id: 'export-pdf', label: 'Export PDF', extension: 'pdf', mime: 'application/pdf' },
@@ -64,7 +84,7 @@ const boardTools: { id: BoardTool; label: string; icon: ReactNode }[] = [
 ];
 // Board tools are FreeformCanvas's own; every vector tool except Select is handled by SketchCanvas in the canvas layer.
 const CANVAS_TOOL: Record<BoardTool, string> = { note: 'sticky', textbox: 'text', table: 'table', connector: 'connector' };
-const HOST_TOOLS = [...tools, ...brushTools].filter(t => t.id !== 'select').map(t => `vector:${t.id}`);
+const HOST_TOOLS = DRAW_TOOLS.filter(t => !['select', 'hand', 'zoom'].includes(t)).map(t => `vector:${t}`);
 const isBoardTool = (tool: AppTool): tool is BoardTool => tool in CANVAS_TOOL;
 const ALIGN: { id: AlignMode; label: string }[] = [{ id: 'left', label: 'Align left' }, { id: 'center', label: 'Align horizontal centres' }, { id: 'right', label: 'Align right' },
   { id: 'top', label: 'Align top' }, { id: 'middle', label: 'Align vertical centres' }, { id: 'bottom', label: 'Align bottom' }];
@@ -94,7 +114,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [contour, setContour] = useState(0), [recoveryStatus, setRecoveryStatus] = useState(initial ? 'Recovered local draft' : '');
   const draftID = useRef(crypto.randomUUID()), flushRecovery = useRef<() => void>(()=>{});
   const svgFile = useRef<HTMLInputElement>(null);
-  const [sides, setSides] = useState(6), [brush, setBrush] = useState<BrushSettings>({ brushPx: 12, eraserPx: 32, taper: true });
+  const [sides, setSides] = useState(6), [brush, setBrush] = useState<BrushSettings>(() => { const { id: _i, name: _n, group: _g, ...style } = BRUSH_PRESETS.find(b => b.id === 'ink-pen')!; return { style, eraserPx: 32 }; });
+  const [brushPreset, setBrushPreset] = useState<string | null>('ink-pen'), [guides, setGuides] = useState<Guides>({}), [recentColours, setRecentColours] = useState<string[]>([]);
   const [layerID, setLayerID] = useState(doc.layers[0].id), [selected, setSelected] = useState<string[]>([]), [node, setNode] = useState<NodeSelection | null>(null);
   const [notice, setNotice] = useState(''), [name, setName] = useState(initial?.name ?? 'Untitled'), [epoch, setEpoch] = useState(0);
   const [snap, setSnap] = useState<SnapSettings>({ enabled: true, grid: false, gridStepPx: 20, distancePx: 8 });
@@ -143,6 +164,22 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const add = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
   const setStyle = (patch: Partial<DrawingPath>) => { if (!disabled) replace(chosen.map(p => ({ ...p, ...patch }))); };
   const chooseTool = (next: AppTool) => { setTool(next); setNode(null); };
+  /** Where a new guide appears: the middle of the view. */
+  const viewCentre = (): [number, number] => { const box = document.querySelector('[aria-label="Sketch board"]')?.getBoundingClientRect(); return [((box?.width ?? 800) / 2 - camera.x) / camera.zoom, ((box?.height ?? 600) / 2 - camera.y) / camera.zoom]; };
+  const toggleGuide = (id: string) => {
+    const [cx, cy] = viewCentre(), u = 1 / camera.zoom;
+    setGuides(g => id === 'ruler' ? { ...g, ruler: g.ruler ? undefined : { a: [cx - 220 * u, cy], b: [cx + 220 * u, cy] } }
+      : id === 'ellipse' ? { ...g, ellipse: g.ellipse ? undefined : { center: [cx, cy], rx: 160 * u, ry: 90 * u, angle: 0 } }
+      : id === 'symmetry' ? { ...g, symmetry: g.symmetry ? undefined : { mode: 'vertical', center: [cx, cy], sections: 6 } }
+      : id === 'perspective' ? { ...g, perspective: g.perspective ? undefined : { points: [[cx, cy - 120 * u]] } }
+      : { ...g, steady: g.steady === undefined ? .5 : undefined });
+    if (id !== 'steady' && !isBoardTool(tool) && !['brush', 'paint', 'eraser'].includes(tool)) chooseTool('brush');
+  };
+  /** The palette sets the drawing colour and recolours the selection: brush strokes by fill, lines by stroke. */
+  const pickColour = (hex: string) => {
+    setPaint(p => ({ ...p, color: hex })); setRecentColours(r => [hex, ...r.filter(c => c !== hex)].slice(0, 10));
+    if (chosen.length && !disabled) replace(chosen.map(p => p.strokeEnabled === false ? { ...p, fill: hex, fillGradient: undefined } : { ...p, color: hex }));
+  };
   const undo = () => { setEpoch(e => e + 1); history.undo(); }, redo = () => { setEpoch(e => e + 1); history.redo(); };
   const agentInteraction=useAgentInteraction({contextKey:`${documentIdentity}:${persistence.file?.id??draftID.current}:${location.search}`,doc,
     writable:!(isLocalDocument()||isStudioHosted())||(persistence.ready&&persistence.file?.writable!==false),commit,
@@ -186,8 +223,10 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const save = () => { const text = serializeDocument(doc); download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
   const editCommand = (id: string) => {
     const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
+    if (id === 'sample-car') { openSample(); return; }
     if (id === 'artboard') { commit(d => ({ ...d, infinite: !d.infinite })); return; }
-    if (tools.some(t => t.id === id) || brushTools.some(t => t.id === id) || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
+    if (id in TOOL_INFO || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
+    if (id.startsWith('guide-')) { toggleGuide(id.slice(6)); return; }
     if (id === 'image') { imageFile.current?.click(); return; }
     if (id === 'fit') { canvasController.current?.fit(); return; }
     if (id === 'zoom-100') { canvasController.current?.zoomTo(1); return; }
@@ -202,6 +241,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (id === 'ungroup') changeLayer(l => ungroupSelection(l, selected));
     if (id === 'delete') remove();
   };
+  const openSample=()=>{void beginDocument().then(()=>{history.open(sampleCarSketch());setName('Car sketch sample');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);setTimeout(()=>canvasController.current?.fit(),0);}).catch(e=>setNotice(e.message));};
   const newDrawing=()=>{void beginDocument().then(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
   const fileActions = <MenuButton label="Document controls" items={[
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
@@ -209,8 +249,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         {id:'undo',label:'Undo',disabled:!history.canUndo,separatorBefore:true},{id:'redo',label:'Redo',disabled:!history.canRedo},
       ]} onSelect={id=>{if(id==='new')newDrawing();else if(id==='open')file.current?.click();else if(id==='import')svgFile.current?.click();else if(id==='save')save();else if(id==='undo')undo();else if(id==='redo')redo();}}><AetherIcon name="menu"/></MenuButton>;
   const searchCommands = [
-    ...tools.map(t => ({ id: t.id, label: t.label, category: 'Draw', icon: <ToolIcon name={t.icon} /> })),
-    ...brushTools.map(t => ({ id: t.id, label: t.label, category: 'Draw', icon: t.icon })),
+    ...DRAW_TOOLS.map(id => ({ id, label: TOOL_INFO[id].label, category: 'Tools', icon: TOOL_INFO[id].icon })),
+    ...GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, category: 'Guides', icon: g.icon })),
     ...boardTools.map(t => ({ id: t.id, label: t.label, category: 'Board', icon: t.icon })),
     { id: 'image', label: 'Add image or file…', category: 'Board' },
     ...ALIGN.map(a => ({ id: `align-${a.id}`, label: a.label, category: 'Arrange', disabled: !chosen.length })),
@@ -222,7 +262,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'rotate-90', label: 'Rotate 90°', category: 'Arrange', disabled: !chosen.length },
     { id: 'group', label: 'Group', category: 'Arrange', disabled: selected.length < 2 }, { id: 'ungroup', label: 'Ungroup', category: 'Arrange' },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
-    { id: 'save', label: 'Save drawing', category: 'File' }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
+    { id: 'save', label: 'Save drawing', category: 'File' }, { id: 'sample-car', label: 'New sample: car sketch', category: 'File' }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
     { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
   ];
@@ -284,19 +324,9 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }}
       toolbar={{ workspaces: [{ id: 'vector', label: 'Vector', icon: <AetherIcon name="sketch" /> }], workspaceID: 'vector', onWorkspaceSelect: () => {},
         activeTabID: ribbonTab, onTabSelect: setRibbonTab, onCommand: editCommand, tabs: [
-      { id: 'draw', label: 'Draw', groups: [
-        { id: 'select', label: 'Select', tools: tools.slice(0, 2).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
-        { id: 'draw', label: 'Draw', tools: tools.slice(2, 7).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
-        { id: 'brush', label: 'Brush', tools: brushTools.map(t => ({ ...t, active: tool === t.id })) },
-        { id: 'paths', label: 'Paths', tools: tools.slice(7, 10).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
-        { id: 'paint', label: 'Vector paint', tools: tools.slice(10).map(t => ({ ...t, icon: <ToolIcon name={t.icon} />, active: tool === t.id })) },
-      ] },
-      { id: 'board', label: 'Board', groups: [
-        { id: 'select', label: 'Select', tools: [{ ...tools[0], icon: <ToolIcon name={tools[0].icon} />, active: tool === 'select' }] },
-        { id: 'notes', label: 'Notes', tools: boardTools.map(t => ({ ...t, active: tool === t.id })) },
-        { id: 'media', label: 'Media', tools: [{ id: 'image', label: 'Image or file', icon: <AetherIcon name="image" /> }] },
-      ] },
-      { id: 'arrange', label: 'Arrange', groups: [
+      ...TOOL_TABS.filter(t => t.id !== 'edit').map(t => ({ ...t, groups: t.groups.map(g => ({ ...g, tools: g.tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) })) })),
+      { id: 'edit', label: 'Edit', groups: [
+        { id: 'select', label: 'Select', tools: TOOL_TABS[2].groups[0].tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) },
         { id: 'organize', label: 'Group', tools: [
           { id: 'group', label: 'Group', icon: <AetherIcon name="rectangle-group" />, disabled: disabled || selected.length < 2 },
           { id: 'ungroup', label: 'Ungroup', icon: <AetherIcon name="squares-dashed" />, disabled: disabled || !chosen.some(p => p.groupID) },
@@ -332,18 +362,17 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         inspector: <SelectionInspector paths={chosen} board={chosenBoard} layer={layer} />,
         properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
           onDelete={() => { changeBoard(board.filter(i => !boardSelection.includes(i.id) && !(i.kind === 'connector' && (boardSelection.includes(i.from ?? '') || boardSelection.includes(i.to ?? ''))))); setBoardSelection([]); }} />}
-        <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<strong>{tools.find(t => t.id === tool)?.label ?? brushTools.find(t => t.id === tool)?.label ?? boardTools.find(t => t.id === tool)?.label}</strong>
-          {tool === 'brush' && <><FieldRow label="Size"><Slider min={1} max={200} value={brush.brushPx} unit="px" onChange={brushPx => setBrush(b => ({ ...b, brushPx }))} ariaLabel="Brush size" /></FieldRow>
-            <FieldRow label="Ends"><Checkbox label="Taper" checked={brush.taper} onChange={event => setBrush(b => ({ ...b, taper: event.target.checked }))} /></FieldRow></>}
+        <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<GuidePanel guides={guides} onChange={setGuides} /><strong>{isBoardTool(tool) ? boardTools.find(t => t.id === tool)?.label : TOOL_INFO[tool].label.replace(/ \(.*\)$/, '')}</strong>
+          {tool === 'brush' && <BrushPanel style={brush.style} presetID={brushPreset} color={paint.color} onChange={(style, id) => { setBrush(b => ({ ...b, style })); setBrushPreset(id); }} />}
           {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
-          {tool === 'polygon' && <FieldRow label="Sides"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
+          {(tool === 'polygon' || tool === 'star') && <FieldRow label="Points"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
           <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
         <div className="sketch-layer-settings"><strong>Layer · {layer.name}</strong>
           <FieldRow label="Opacity"><Slider min={0} max={100} unit="%" value={Math.round((layer.opacity ?? 1) * 100)} disabled={layer.locked} ariaLabel="Layer opacity"
             onChange={value => changeLayer(l => ({ ...l, opacity: value / 100 }))} /></FieldRow>
           <FieldRow label="Blend"><SelectField aria-label="Layer blend mode" value={layer.blend ?? 'normal'} disabled={layer.locked} options={BLEND_MODES.map(value => ({ value, label: value.replace('-', ' ') }))}
             onChange={event => { const blend = event.target.value as BlendMode; changeLayer(l => ({ ...l, blend: blend === 'normal' ? undefined : blend })); }} /></FieldRow></div></div>,
-        appearance: <div className="sketch-properties"><VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
+        appearance: <div className="sketch-properties"><ColourPanel value={paint.color} recent={recentColours} onPick={pickColour} /><VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
             inside={!!insideID} onInside={() => { setInsideID(insideID ? null : chosen[0]?.id ?? null); chooseTool('paint'); }}
             onChange={patch => { setPaint(p => ({ ...p, ...patch })); setStyle(patch); }}
             canRelease={chosen.some(p => ancestors(layer, p.groupID).some(g => g.clipPathID))}
@@ -353,21 +382,24 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       }}
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
-        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
+        toggles: GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, icon: g.icon, pressed: g.id === 'steady' ? guides.steady !== undefined : !!guides[g.id] })),
+        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, { id: 'sample-car', label: 'New sample: car sketch', icon: <AetherIcon name="sparkles" /> }, { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
           { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, icon: <AetherIcon name="export" /> }))] }}
       environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
-        actions: [{ id: 'fit', label: 'Zoom to fit', icon: <AetherIcon name="fit" /> }, { id: 'zoom-100', label: 'Zoom to 100%', icon: <AetherIcon name="zoom-in" /> },
+        actions: [{ id: 'board', label: 'Board: notes, text boxes, tables, connectors, images', icon: <AetherIcon name="notes" />, pressed: isBoardTool(tool),
+            items: [...boardTools.map(t => ({ id: t.id, label: t.label, icon: t.icon })), { id: 'image', label: 'Image or file…', icon: <AetherIcon name="image" /> }] },
+          { id: 'fit', label: 'Zoom to fit', icon: <AetherIcon name="fit" /> }, { id: 'zoom-100', label: 'Zoom to 100%', icon: <AetherIcon name="zoom-in" /> },
           { id: 'grid', label: 'Dot grid', icon: <AetherIcon name="grid-dots" />, pressed: boardGrid }, { id: 'connectors', label: 'Show connectors', icon: <ToolIcon name="connector" />, pressed: boardConnectors },
           { id: 'snap', label: 'Snapping', icon: <AetherIcon name="timeline-snap" />, pressed: snap.enabled },
           { id: 'artboard', label: 'Artboard', icon: <AetherIcon name="rectangle-dashed" />, pressed: !doc.infinite }] }}>
       <div className="sketch-board" onKeyDown={boardKeys}>
         <FreeformCanvas aria-label="Sketch board" hud={false} zoomLimits={ZOOM_LIMITS} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
           selection={boardSelection} onSelectionChange={selectBoard} onUndo={undo} onRedo={redo} tools={[]} controllerRef={canvasController}
-          tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' ? 'select' : `vector:${tool}`} hostTools={HOST_TOOLS}
+          tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' || tool === 'hand' || tool === 'zoom' ? tool : `vector:${tool}`} hostTools={HOST_TOOLS}
           onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom })}
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
-          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush}
-        selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add([path])} onSplice={splice}
+          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
+        selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>
     </StandardAppShell>
