@@ -61,7 +61,24 @@ const TOOL_TABS: { id: string; label: string; groups: { id: string; label: strin
     { id: 'colour', label: 'Fill and colour', tools: ['fill', 'freehand', 'eyedropper'] }] },
   { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
   { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
+  { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint'] },
+    { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'paint', label: 'Paint', tools: ['fill', 'eyedropper'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
 ];
+/** One app, two workspaces on the same drawing (Affinity-style personas): Pixel paints like SketchBook and Fresco, Vector edits paths like Affinity Designer and Illustrator. */
+type Workspace = 'pixel' | 'vector';
+const WORKSPACES: Record<Workspace, { label: string; icon: ReactNode; tabs: string[] }> = {
+  pixel: { label: 'Pixel', icon: <AetherIcon name="brush" />, tabs: ['draw', 'shapes', 'edit'] },
+  vector: { label: 'Vector', icon: <ToolIcon name="pen" />, tabs: ['paths', 'edit'] },
+};
+const WORKSPACE_KEY = 'aether-sketch.workspace';
+/** `?workspace=vector` (the Aether Vector launcher) wins, then this browser's last choice. */
+function initialWorkspace(): Workspace {
+  const asked = new URLSearchParams(location.search).get('workspace');
+  if (asked === 'pixel' || asked === 'vector') return asked;
+  try { const saved = localStorage.getItem(WORKSPACE_KEY); if (saved === 'pixel' || saved === 'vector') return saved; } catch { /* a convenience only */ }
+  return 'pixel';
+}
+const workspaceTools = (w: Workspace) => new Set(TOOL_TABS.filter(t => WORKSPACES[w].tabs.includes(t.id)).flatMap(t => t.groups.flatMap(g => g.tools)));
 const GUIDES: { id: 'ruler' | 'ellipse' | 'symmetry' | 'perspective' | 'steady'; label: string; icon: ReactNode }[] = [
   { id: 'ruler', label: 'Ruler', icon: <AetherIcon name="ruler" /> }, { id: 'ellipse', label: 'Ellipse guide', icon: <AetherIcon name="circle-dashed" /> },
   { id: 'symmetry', label: 'Symmetry', icon: <ToolIcon name="mirror" /> }, { id: 'perspective', label: 'Perspective guide', icon: <AetherIcon name="grid-cross" /> },
@@ -108,7 +125,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [preset, setPreset] = useState<'docked' | 'floating' | 'canvas'>('floating'), [tool, setTool] = useState<AppTool>('select');
   const [camera, setCamera] = useState<FreeformCamera>({ x: 48, y: 48, zoom: 1 }), [boardSelection, setBoardSelection] = useState<string[]>([]);
   const [boardGrid, setBoardGrid] = useState(true), [boardConnectors, setBoardConnectors] = useState(true);
-  const [ribbonTab, setRibbonTab] = useState('draw'), canvasController = useRef<FreeformCanvasController>(null), imageFile = useRef<HTMLInputElement>(null);
+  const [workspace, setWorkspace] = useState(initialWorkspace), [ribbonTab, setRibbonTab] = useState(() => WORKSPACES[initialWorkspace()].tabs[0]), canvasController = useRef<FreeformCanvasController>(null), imageFile = useRef<HTMLInputElement>(null);
   const [panelState, setPanelState] = useState<WorkspacePanelState>(() => { try { const v: unknown = JSON.parse(sessionStorage.getItem(PANELS_KEY) ?? '{}'); return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length ? v as WorkspacePanelState : DEFAULT_PANELS; } catch { return DEFAULT_PANELS; } });
   const [paint, setPaint] = useState<PaintStyle>(defaultPaint), [insideID, setInsideID] = useState<string | null>(null);
   const [contour, setContour] = useState(0), [recoveryStatus, setRecoveryStatus] = useState(initial ? 'Recovered local draft' : '');
@@ -324,9 +341,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       commands={searchCommands} onCommand={runCommand} layout={preset} onLayoutChange={setPreset}
       panelState={panelState} onPanelStateChange={state => { setPanelState(state); try { sessionStorage.setItem(PANELS_KEY, JSON.stringify(state)); } catch { /* layout is a convenience */ } }}
       sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }}
-      toolbar={{ workspaces: [{ id: 'vector', label: 'Vector', icon: <AetherIcon name="sketch" /> }], workspaceID: 'vector', onWorkspaceSelect: () => {},
+      toolbar={{ workspaces: (Object.keys(WORKSPACES) as Workspace[]).map(id => ({ id, label: WORKSPACES[id].label, icon: WORKSPACES[id].icon })), workspaceID: workspace,
+        onWorkspaceSelect: id => { const next = id as Workspace; setWorkspace(next); setRibbonTab(WORKSPACES[next].tabs[0]); if (!isBoardTool(tool) && !workspaceTools(next).has(tool)) chooseTool('select');
+          try { localStorage.setItem(WORKSPACE_KEY, next); } catch { /* a convenience only */ } },
         activeTabID: ribbonTab, onTabSelect: setRibbonTab, onCommand: editCommand, tabs: [
-      ...TOOL_TABS.filter(t => t.id !== 'edit').map(t => ({ ...t, groups: t.groups.map(g => ({ ...g, tools: g.tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) })) })),
+      ...TOOL_TABS.filter(t => t.id !== 'edit' && WORKSPACES[workspace].tabs.includes(t.id)).map(t => ({ ...t, groups: t.groups.map(g => ({ ...g, tools: g.tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) })) })),
       { id: 'edit', label: 'Edit', groups: [
         { id: 'select', label: 'Select', tools: TOOL_TABS[2].groups[0].tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) },
         { id: 'organize', label: 'Group', tools: [
