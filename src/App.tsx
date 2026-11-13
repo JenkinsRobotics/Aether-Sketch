@@ -25,7 +25,7 @@ import { createDocument } from './create-document';
 import { driveRequest, editorURL, encodeFile, fileIcon, fileType, type DriveFile } from '@aether/session/library/drive-api';
 import { STICKY_COLORS } from './board';
 import { AetherIcon, SelectField, ToolIcon, Slider, MenuButton } from '@aether/ui';
-import { SketchCanvas, type BrushSettings, type EditorTool } from './SketchCanvas';
+import { SketchCanvas, type BrushSettings, type EditorTool, type PixelSelect } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
 import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, repairClips, type PaintStyle } from './paint';
@@ -40,7 +40,8 @@ import { ancestors } from './structure';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
 import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
-import { compositePixels, fillPixels, paintPixels, pixelBounds, samplePixel, unionRect, type PixelResult, type Rect } from './pixels';
+import { clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
+  type Matrix, type PixelResult, type PixelSelection, type Rect, type SelectMode, type SelectionResult } from './pixels';
 import { useDocument } from './useDocument';
 import './sketch.css';
 /** Every drawing tool, with a name and a recognisable icon. Keys: V select, H hand, Z zoom, B brush, Shift+B pencil,
@@ -57,6 +58,10 @@ const TOOL_INFO: Record<EditorTool, { label: string; icon: ReactNode }> = {
   rect: { label: 'Rectangle (M)', icon: <ToolIcon name="rectangle" /> }, square: { label: 'Square', icon: <ToolIcon name="rectangle" /> },
   ellipse: { label: 'Ellipse (E)', icon: <AetherIcon name="circle" /> }, circle: { label: 'Circle', icon: <AetherIcon name="circle" /> },
   polygon: { label: 'Polygon (G)', icon: <AetherIcon name="hexagon" /> }, star: { label: 'Star', icon: <AetherIcon name="star" /> }, text: { label: 'Text (T)', icon: <AetherIcon name="text" /> },
+  // ponytail: polygon select borrows the polygon tool's hexagon icon, and the wand the sparkles, until core/assets gains their own.
+  marquee: { label: 'Rectangle select', icon: <AetherIcon name="rectangle-dashed" /> }, 'marquee-ellipse': { label: 'Ellipse select', icon: <AetherIcon name="circle-dashed" /> },
+  'marquee-lasso': { label: 'Freehand select', icon: <AetherIcon name="lasso" /> }, 'marquee-polygon': { label: 'Polygon select', icon: <AetherIcon name="hexagon" /> },
+  wand: { label: 'Magic wand: select by colour', icon: <AetherIcon name="sparkles" /> }, transform: { label: 'Move and transform pixels', icon: <AetherIcon name="move" /> },
   lasso: { label: 'Lasso select (Q)', icon: <AetherIcon name="lasso" /> }, node: { label: 'Edit nodes (A)', icon: <AetherIcon name="node-select" /> }, trim: { label: 'Trim at crossings', icon: <AetherIcon name="scissors" /> },
 };
 /** The tool bar's tabs: drawing first, then shapes, then editing. Guides live in the center tray, board items in the environment tray. */
@@ -67,11 +72,13 @@ const TOOL_TABS: { id: string; label: string; groups: { id: string; label: strin
   { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
   { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint', 'brush'] },
     { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'paint', label: 'Paint', tools: ['fill', 'eyedropper'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
+  { id: 'select', label: 'Select', groups: [{ id: 'marquee', label: 'Select pixels', tools: ['marquee', 'marquee-ellipse', 'marquee-lasso', 'marquee-polygon', 'wand'] }, { id: 'move', label: 'Move', tools: ['transform'] }] },
 ];
+const SELECT_MODES: { value: SelectMode; label: string }[] = [{ value: 'new', label: 'New selection' }, { value: 'add', label: 'Add to selection' }, { value: 'subtract', label: 'Subtract from selection' }, { value: 'intersect', label: 'Intersect with selection' }];
 /** One app, two workspaces on the same drawing (Affinity-style personas): Pixel paints like SketchBook and Fresco, Vector edits paths like Affinity Designer and Illustrator. */
 type Workspace = 'pixel' | 'vector';
 const WORKSPACES: Record<Workspace, { label: string; icon: ReactNode; tabs: string[] }> = {
-  pixel: { label: 'Pixel', icon: <AetherIcon name="brush" />, tabs: ['draw', 'shapes', 'edit'] },
+  pixel: { label: 'Pixel', icon: <AetherIcon name="brush" />, tabs: ['draw', 'shapes', 'select', 'edit'] },
   vector: { label: 'Vector', icon: <ToolIcon name="pen" />, tabs: ['paths', 'edit'] },
 };
 const WORKSPACE_KEY = 'aether-sketch.workspace';
@@ -206,6 +213,54 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     });
     return pixelQueue.current;
   };
+  // ---- Pixel selection: where pixel edits land, and what Move and transform works on. Not part of the drawing file. ----
+  const [selection, setSelection] = useState<PixelSelection | null>(null), [selectMode, setSelectMode] = useState<SelectMode>('new'), [wandTolerance, setWandTolerance] = useState(32);
+  const selectionRef = useRef(selection); selectionRef.current = selection;
+  /** Undo and redo bring back the selection that was active at each step of the drawing. */
+  const selectionAt = useRef(new WeakMap<object, PixelSelection | null>());
+  const changeSelection = (next: PixelSelection | null) => { selectionAt.current.set(docRef.current, next); selectionRef.current = next; setSelection(next); };
+  useEffect(() => { const kept = selectionAt.current.get(doc); if (kept !== undefined) setSelection(kept); }, [doc]);
+  useEffect(() => setSelection(null), [documentIdentity]);
+  const settleSelection = (result: SelectionResult) => { if ('problem' in result) setNotice(result.problem); else changeSelection(result.selection); };
+  /** Read this layer's bitmap once the queued edits have landed. */
+  const afterPixels = <T,>(read: (bitmap: PixelBitmap | undefined) => Promise<T> | T): Promise<T | undefined> => {
+    const id = layer.id, job = pixelQueue.current.then(() => read(docRef.current.layers.find(l => l.id === id)?.pixels));
+    pixelQueue.current = job.then(() => {}, error => setNotice(error instanceof Error ? error.message : 'The pixels could not be read.'));
+    return job.catch(() => undefined);
+  };
+  const selectArea = doc.infinite ? drawn ?? artboard : artboard;
+  /** Select all: the tight box around everything painted on this layer. */
+  const selectPainted = async (): Promise<PixelSelection | null> => {
+    if (layer.kind !== 'pixel') { setNotice('Select a pixel layer in Layers to select its pixels.'); return null; }
+    const box = await afterPixels(paintedBounds);
+    if (!box) { setNotice('Nothing is painted on this layer yet.'); return null; }
+    const next = rectSelection(box); changeSelection(next); return next;
+  };
+  /** Move, scale, rotate, skew or flip the selected pixels; with nothing selected, everything painted on the layer. */
+  const transformSelected = async (matrix: Matrix, copy = false) => {
+    const sel = selectionRef.current ?? await selectPainted(); if (!sel || layer.kind !== 'pixel') return;
+    let landed = false;
+    await editPixels(layer.id, [], async current => {
+      selectionAt.current.set(docRef.current, sel); // undoing the move brings this selection back
+      const result = await transformPixels(current, sel, matrix, copy); landed = !!result && 'bitmap' in result; return result;
+    });
+    if (landed) changeSelection(transformSelection(sel, matrix));
+  };
+  const turnPixels = async (id: string) => {
+    const sel = selectionRef.current ?? await selectPainted(); if (!sel) return;
+    const { x, y, width, height } = sel.rect, cx = x + width / 2, cy = y + height / 2;
+    await transformSelected(id === 'pixel-flip-horizontal' ? [-1, 0, 0, 1, 2 * cx, 0] : id === 'pixel-flip-vertical' ? [1, 0, 0, -1, 0, 2 * cy] : [0, 1, -1, 0, Math.round(cx + cy), Math.round(cy - cx)]);
+  };
+  const pixelSelect: PixelSelect = { selection, mode: selectMode,
+    shape: (shape, mode) => settleSelection(shapeSelection(selectionRef.current, shape, mode)),
+    wand: (at, mode) => {
+      if (layer.kind !== 'pixel') { setNotice('The magic wand selects by colour on a pixel layer. Select one in Layers.'); return; }
+      void afterPixels(async bitmap => settleSelection(await wandSelection(selectionRef.current, bitmap, at, selectArea, wandTolerance, mode)));
+    },
+    all: () => void selectPainted(), none: () => changeSelection(null),
+    invert: () => { const sel = selectionRef.current; if (sel) settleSelection(invertSelection(sel, selectArea)); },
+    clear: () => { const sel = selectionRef.current; if (sel && layer.kind === 'pixel') void editPixels(layer.id, [], current => clearPixels(current, sel)); },
+    transform: transformSelected };
   const addVector = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
   /** The Pixel workspace paints pixels and the Vector workspace draws paths, whatever layer is current: when the
    * current layer is the other kind, a layer of the right kind is added above it (Affinity's assistant). Text is always a vector object. */
@@ -219,7 +274,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     setLayerID(created.id); setInsideID(null); setNotice('Painting on a new pixel layer.'); return created.id;
   };
   const add = (paths: DrawingPath[]) => {
-    if (workspace === 'pixel' && !paths.some(p => p.text)) { editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint')); return; }
+    if (workspace === 'pixel' && !paths.some(p => p.text)) { const clip = selectionRef.current; editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint', clip)); return; }
     if (layer.kind !== 'pixel') { addVector(paths); return; }
     // Vector drawing on a pixel layer: an unpainted one becomes a vector layer, otherwise a vector layer is added above it.
     if (!layer.pixels) { commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return { ...rest, paths }; }) })); return; }
@@ -230,11 +285,16 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   /** A stamped brush stroke, painted live on its own canvas, lands on the pixel layer at the brush's opacity. */
   const paintStroke = (stroke: HTMLCanvasElement, rect: Rect, opacity: number, clipped: boolean) => {
     if (clipped) setNotice('Part of that stroke fell outside the largest area one pixel layer can hold (4096 px a side).');
-    return editPixels(pixelTarget(), [], current => compositePixels(current, stroke, rect, opacity));
+    const clip = selectionRef.current; return editPixels(pixelTarget(), [], current => compositePixels(current, stroke, rect, opacity, clip));
   };
-  const erasePixels = (outline: [number, number][]) => editPixels(layer.id, [], current => paintPixels(current, [{ id: 'eraser', points: outline, closed: true, fill: '#000000', color: '#000000', widthPx: 1, opacity: 1, strokeEnabled: false }], 'erase'));
+  const erasePixels = (outline: [number, number][]) => { const clip = selectionRef.current; return editPixels(layer.id, [], current => paintPixels(current, [{ id: 'eraser', points: outline, closed: true, fill: '#000000', color: '#000000', widthPx: 1, opacity: 1, strokeEnabled: false }], 'erase', clip)); };
   const setStyle = (patch: Partial<DrawingPath>) => { if (!disabled) replace(chosen.map(p => ({ ...p, ...patch }))); };
-  const chooseTool = (next: AppTool) => { setTool(next); setNode(null); if (next === 'smudge' && !layer.pixels) setNotice('Smudge works on a painted pixel layer. Select one in Layers.'); };
+  const chooseTool = (next: AppTool) => {
+    setTool(next); setNode(null);
+    if (next === 'smudge' && !layer.pixels) setNotice('Smudge works on a painted pixel layer. Select one in Layers.');
+    // Move and transform with nothing selected takes everything painted on the layer.
+    if (next === 'transform' && !selectionRef.current) { if (layer.pixels) void selectPainted(); else setNotice('Move and transform work on a painted pixel layer. Select one in Layers.'); }
+  };
   /** Where a new guide appears: the middle of the view. */
   const viewCentre = (): [number, number] => { const box = document.querySelector('[aria-label="Sketch board"]')?.getBoundingClientRect(); return [((box?.width ?? 800) / 2 - camera.x) / camera.zoom, ((box?.height ?? 600) / 2 - camera.y) / camera.zoom]; };
   const toggleGuide = (id: string) => {
@@ -253,7 +313,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   };
   /** Fill and eyedropper on a pixel layer work on its pixels. Fill is bounded by the page, or by everything drawn on an infinite canvas. */
   const pixelPoint = (which: 'fill' | 'eyedropper', at: [number, number]) => {
-    if (which === 'fill') { editPixels(layer.id, [], current => fillPixels(current, at, paint.color, doc.infinite ? drawn ?? artboard : artboard)); return; }
+    if (which === 'fill') { const clip = selectionRef.current; editPixels(layer.id, [], current => fillPixels(current, at, paint.color, selectArea, 32, clip)); return; }
     void samplePixel(layer.pixels, at).then(hex => { if (hex) pickColour(hex); setNotice(hex ? `Picked ${hex}.` : 'Nothing is painted there on this layer.'); }).catch(() => setNotice('The colour could not be read.'));
   };
   const undo = () => { setEpoch(e => e + 1); history.undo(); }, redo = () => { setEpoch(e => e + 1); history.redo(); };
@@ -302,6 +362,9 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
     const sample = SAMPLES.find(x => x.id === id); if (sample) { openSample(sample); return; }
     if (id === 'artboard') { commit(d => ({ ...d, infinite: !d.infinite })); return; }
+    if (id === 'select-all') { pixelSelect.all(); return; } if (id === 'select-none') { pixelSelect.none(); return; }
+    if (id === 'select-invert') { pixelSelect.invert(); return; } if (id === 'select-clear') { pixelSelect.clear(); return; }
+    if (id.startsWith('pixel-')) { void turnPixels(id); return; }
     if (id in TOOL_INFO || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
     if (id.startsWith('guide-')) { toggleGuide(id.slice(6)); return; }
     if (id === 'image') { imageFile.current?.click(); return; }
@@ -338,6 +401,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'flip-vertical', label: 'Flip vertical', category: 'Arrange', disabled: !chosen.length },
     { id: 'rotate-90', label: 'Rotate 90°', category: 'Arrange', disabled: !chosen.length },
     { id: 'group', label: 'Group', category: 'Arrange', disabled: selected.length < 2 }, { id: 'ungroup', label: 'Ungroup', category: 'Arrange' },
+    { id: 'select-all', label: 'Select all pixels on this layer', category: 'Select' }, { id: 'select-none', label: 'Deselect pixels', category: 'Select', disabled: !selection },
+    { id: 'select-invert', label: 'Invert pixel selection', category: 'Select', disabled: !selection }, { id: 'select-clear', label: 'Clear selected pixels', category: 'Select', disabled: !selection },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
     { id: 'save', label: 'Save drawing', category: 'File' }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, category: 'File' })), ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
@@ -403,7 +468,19 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         onWorkspaceSelect: id => { const next = id as Workspace; setWorkspace(next); setRibbonTab(WORKSPACES[next].tabs[0]); if (!isBoardTool(tool) && !workspaceTools(next).has(tool)) chooseTool('select');
           try { localStorage.setItem(WORKSPACE_KEY, next); } catch { /* a convenience only */ } },
         activeTabID: ribbonTab, onTabSelect: setRibbonTab, onCommand: editCommand, tabs: [
-      ...TOOL_TABS.filter(t => t.id !== 'edit' && WORKSPACES[workspace].tabs.includes(t.id)).map(t => ({ ...t, groups: t.groups.map(g => ({ ...g, tools: g.tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) })) })),
+      ...TOOL_TABS.filter(t => t.id !== 'edit' && WORKSPACES[workspace].tabs.includes(t.id)).map(t => ({ ...t, groups: [...t.groups.map(g => ({ ...g, tools: g.tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) })),
+        ...(t.id !== 'select' ? [] : [
+          { id: 'selection', label: 'Selection', tools: [
+            { id: 'select-all', label: 'Select all on this layer (Ctrl/Cmd+A)', icon: <AetherIcon name="square-dashed" />, disabled: layer.kind !== 'pixel' },
+            { id: 'select-none', label: 'Deselect (Ctrl/Cmd+D)', icon: <AetherIcon name="close-circle" />, disabled: !selection },
+            { id: 'select-invert', label: 'Invert selection', icon: <AetherIcon name="contrast" />, disabled: !selection },
+            { id: 'select-clear', label: 'Clear selected pixels (Delete)', icon: <AetherIcon name="delete" />, disabled: !selection || layer.kind !== 'pixel' },
+          ] },
+          { id: 'turn', label: 'Flip and rotate', tools: [
+            { id: 'pixel-flip-horizontal', label: 'Flip pixels horizontally', icon: <AetherIcon name="flip-horizontal" />, disabled: !layer.pixels },
+            { id: 'pixel-flip-vertical', label: 'Flip pixels vertically', icon: <ToolIcon name="mirror" />, disabled: !layer.pixels },
+            { id: 'pixel-rotate-90', label: 'Rotate pixels 90°', icon: <ToolIcon name="rotate" />, disabled: !layer.pixels },
+          ] }])] })),
       { id: 'edit', label: 'Edit', groups: [
         { id: 'select', label: 'Select', tools: TOOL_TABS[2].groups[0].tools.map(id => ({ id, ...TOOL_INFO[id], active: tool === id })) },
         { id: 'organize', label: 'Group', tools: [
@@ -445,9 +522,15 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           {tool === 'brush' && <BrushPanel pixel={workspace === 'pixel'} style={brush.style} presetID={brushPreset} color={paint.color} onChange={(style, id) => { setBrush(b => ({ ...b, style })); setBrushPreset(id); }} />}
           {tool === 'smudge' && <><FieldRow label="Size"><Slider min={4} max={300} value={brush.smudgePx} unit="px" onChange={smudgePx => setBrush(b => ({ ...b, smudgePx }))} ariaLabel="Smudge size" /></FieldRow>
             <FieldRow label="Strength"><Slider min={5} max={95} value={Math.round(brush.smudge * 100)} unit="%" onChange={v => setBrush(b => ({ ...b, smudge: v / 100 }))} ariaLabel="Smudge strength" /></FieldRow></>}
+          {(tool.startsWith('marquee') || tool === 'wand') && <FieldRow label="Mode"><SelectField aria-label="Selection mode" value={selectMode} options={SELECT_MODES} onChange={event => setSelectMode(event.target.value as SelectMode)} /></FieldRow>}
+          {tool === 'wand' && <FieldRow label="Tolerance"><Slider min={0} max={255} value={wandTolerance} onChange={setWandTolerance} ariaLabel="Magic wand tolerance" /></FieldRow>}
           {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
           {(tool === 'polygon' || tool === 'star') && <FieldRow label="Points"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
-          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'smudge' ? 'Drag to push paint around on a pixel layer. Size is on screen; strength is how far the paint carries.' : tool === 'brush' && workspace === 'pixel' ? 'Paints pixels as you draw. Pressure from a pen, or speed from a mouse, sets the width. Flow is how much paint each stamp lays down; opacity caps the whole stroke; grain lets paper texture show through.' : tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
+          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'transform' ? 'Drag inside the selection to move its pixels; Alt-drag moves a copy. Drag a handle to scale (Shift keeps the proportions), the round handle to rotate, or a side handle with Ctrl or Cmd to skew. Arrow keys nudge. With nothing selected, everything painted on the layer moves.'
+            : tool === 'wand' ? 'Click to select the connected area of similar colour on this pixel layer. Tolerance is how different a colour may be. Shift adds, Alt subtracts.'
+            : tool === 'marquee-polygon' ? 'Click each corner; click the first corner, double-click or press Enter to finish. Painting, erasing and filling then stay inside the selection.'
+            : tool.startsWith('marquee') ? 'Drag to select. Hold Shift as you start to add, Alt to subtract, both to intersect. Painting, erasing and filling then stay inside the selection; Delete clears it; Ctrl or Cmd+D deselects.'
+            : tool === 'smudge' ? 'Drag to push paint around on a pixel layer. Size is on screen; strength is how far the paint carries.' : tool === 'brush' && workspace === 'pixel' ? 'Paints pixels as you draw. Pressure from a pen, or speed from a mouse, sets the width. Flow is how much paint each stamp lays down; opacity caps the whole stroke; grain lets paper texture show through.' : tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
         <div className="sketch-layer-settings"><strong>Layer · {layer.name}</strong>
           <FieldRow label="Opacity"><Slider min={0} max={100} unit="%" value={Math.round((layer.opacity ?? 1) * 100)} disabled={layer.locked} ariaLabel="Layer opacity"
             onChange={value => changeLayer(l => ({ ...l, opacity: value / 100 }))} /></FieldRow>
@@ -481,7 +564,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
           layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
-        pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
+        select={pixelSelect} pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
         openPixels={() => pixelQueue.current.then(() => docRef.current.layers.find(l => l.id === layer.id)?.pixels)} onSmudged={(layerID, stroke) => editPixels(layerID, [], async () => ({ bitmap: await stroke.encode() }))}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>

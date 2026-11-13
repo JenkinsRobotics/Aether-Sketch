@@ -57,6 +57,12 @@ html, body, #root { height: 100%; margin: 0; }
 /* Stamped strokes in progress: canvases in document pixels, over the drawing, until the layer takes them. */
 .sketch-pixel-overlay { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; }
 .sketch-pixel-overlay canvas { position: absolute; pointer-events: none; max-width: none; }
+/* Pixel selection: white line under black dashes, so it shows on any colour. Stepped, so it repaints ten times a second. */
+.sketch-ants { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; will-change: transform; }
+.sketch-ants path { fill: none; stroke: #fff; stroke-width: 1; }
+.sketch-ants .sketch-ants-march { stroke: #000; stroke-dasharray: 4 4; animation: sketch-ants .8s steps(8) infinite; }
+@keyframes sketch-ants { to { stroke-dashoffset: -8; } }
+@media (prefers-reduced-motion: reduce) { .sketch-ants .sketch-ants-march { animation: none; } }
 .sketch-eraser-preview { fill: var(--aether-color-accent); fill-opacity: .25; stroke: var(--aether-color-accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .sketch-layer-settings { display: grid; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--aether-color-border); }
 /* Drawing guides: thin accent lines, round handles that drag. Lines ignore the pointer so strokes pass through them. */

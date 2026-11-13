@@ -13,12 +13,13 @@ import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pathVisible, pathLocked, rootGroup, groupPaths } from './structure';
 import type { NodeSelection, SnapSettings } from './VectorInspector';
 import { brushOpacity, brushOutline, dabsTo, eraseWith, newDabState, type BrushSample, type BrushStyle, type DabState } from './brush';
-import { DabStroke, SmudgeStroke, type Rect } from './pixels';
+import { DabStroke, SmudgeStroke, IDENTITY, fitMatrix, liftPixels, moveMatrix, rotateMatrix, skewMatrix, type Matrix, type PixelSelection, type Rect, type SelectMode } from './pixels';
 import type { PixelBitmap } from './document';
 import { steadyPoint, strokeConstraint, symmetryMaps, type Guides } from './guides';
 import { GuideOverlay, moveGuide } from './GuideOverlay';
 import { joinOpenPath } from './join';
-export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'smudge' | 'star' | 'lasso' | 'hand' | 'zoom';
+export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'smudge' | 'star' | 'lasso' | 'hand' | 'zoom'
+  | 'marquee' | 'marquee-ellipse' | 'marquee-lasso' | 'marquee-polygon' | 'wand' | 'transform';
 /** A star from a regular polygon's corners: an inner point between each pair, at half the outer radius. */
 export function starShape(corners: Point[]): Point[] {
   const c: Point = [corners.reduce((n, p) => n + p[0], 0) / corners.length, corners.reduce((n, p) => n + p[1], 0) / corners.length], k = .5 / Math.cos(Math.PI / corners.length);
@@ -29,7 +30,16 @@ export function insidePolygon(p: Point, ring: Point[]) {
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if ((ring[i][1] > p[1]) !== (ring[j][1] > p[1]) && p[0] < (ring[j][0] - ring[i][0]) * (p[1] - ring[i][1]) / (ring[j][1] - ring[i][1]) + ring[i][0]) inside = !inside;
   return inside;
 }
-const ENGINE_TOOL: Partial<Record<EditorTool, SketchTool>> = { star: 'polygon', lasso: 'freehand' };
+// The pixel selection tools borrow the engine's drafts: a dragged box or ellipse, a freehand loop, and the pen for a polygon.
+const ENGINE_TOOL: Partial<Record<EditorTool, SketchTool>> = { star: 'polygon', lasso: 'freehand', marquee: 'rect', 'marquee-ellipse': 'ellipse', 'marquee-lasso': 'freehand', 'marquee-polygon': 'pen' };
+/** The pixel selection and what the canvas can do with it. Selecting works on any layer; clearing and transforming need a pixel layer. */
+export interface PixelSelect {
+  selection: PixelSelection | null; mode: SelectMode;
+  shape: (shape: DrawingPath, mode: SelectMode) => void; wand: (at: Point, mode: SelectMode) => void;
+  all: () => void; none: () => void; invert: () => void; clear: () => void;
+  transform: (matrix: Matrix, copy: boolean) => Promise<void>;
+}
+type Lift = { sel: PixelSelection; origin: Point; handle: ResizeHandle | 'rotate' | null; copy: boolean; skew: boolean; matrix: Matrix; moved: boolean; box: HTMLDivElement; float?: HTMLCanvasElement };
 /** The active brush and eraser. Sizes are on screen, so zooming in draws finer. */
 export interface BrushSettings { style: BrushStyle; eraserPx: number; /** Smudge tip width on screen and how much paint it carries (0–1). */ smudgePx: number; smudge: number }
 interface Props {
@@ -44,6 +54,7 @@ interface Props {
   /** Smudge reads the layer's bitmap once queued edits have landed, and hands the smudged canvas back to be saved. */
   openPixels: () => Promise<PixelBitmap | undefined>; onSmudged: (layerID: string, stroke: SmudgeStroke) => Promise<void>;
   pixelBrush: boolean; onPaintStroke: (stroke: HTMLCanvasElement, rect: Rect, opacity: number, clipped: boolean) => Promise<void>;
+  select: PixelSelect;
   pending: { layerID: string; paths: DrawingPath[] }[]; onErasePixels: (outline: Point[]) => void; onPixelPoint: (tool: 'fill' | 'eyedropper', at: Point) => void;
   onSplice: (ids: string[], paths: DrawingPath[]) => void; onDelete: () => void; undo: () => void; redo: () => void;
 }
@@ -53,7 +64,7 @@ export function SketchCanvas(props: Props) {
   const draftRef = useRef<Draft | null>(null), drag = useRef<Drag | null>(null), stroke = useRef<{ samples: BrushSample[]; pen: boolean; start: Point; last: Point; follow?: ((p: Point) => Point) | null } | null>(null);
   const guideDrag = useRef<string | null>(null);
   // A stamped stroke in progress: its canvas sits over the drawing, in document pixels, until the layer takes it.
-  const overlay = useRef<HTMLDivElement>(null), dab = useRef<{ stroke: DabStroke; state: DabState; fed: number; sizePx: number } | null>(null);
+  const overlay = useRef<HTMLDivElement>(null), dab = useRef<{ stroke: DabStroke; el: HTMLElement; state: DabState; fed: number; sizePx: number } | null>(null);
   const feedDabs = () => {
     const d = dab.current, st = stroke.current; if (!d || !st) return;
     const maps = props.drawGuides.symmetry ? symmetryMaps(props.drawGuides.symmetry) : [];
@@ -67,7 +78,7 @@ export function SketchCanvas(props: Props) {
     const radius = props.brush.smudgePx / 2 / scale(), strength = props.brush.smudge;
     smudge.current = { layerID: target.id, radius, job: props.openPixels().then(async bitmap => {
       if (!bitmap) return null;
-      const s = await SmudgeStroke.open(bitmap), r = s.rect;
+      const s = await SmudgeStroke.open(bitmap, props.select.selection), r = s.rect;
       Object.assign(s.canvas.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.width}px`, height: `${r.height}px`, opacity: String(target.opacity ?? 1), mixBlendMode: target.blend ?? 'normal' });
       overlay.current?.appendChild(s.canvas); setVeiled(target.id); s.to(at, radius, strength); return s;
     }) };
@@ -78,10 +89,43 @@ export function SketchCanvas(props: Props) {
     void m.job.then(async s => { if (!s) return; try { if (keep && s.changed) await props.onSmudged(m.layerID, s); else s.release(); } finally { s.canvas.remove(); setVeiled(null); } });
   };
   const startDabs = () => {
-    const own = props.layer?.kind === 'pixel' ? props.layer : undefined, s = new DabStroke(props.paint.color, props.brush.style);
-    Object.assign(s.canvas.style, { opacity: String(props.brush.style.opacity * (own?.opacity ?? 1)), mixBlendMode: own?.blend ?? 'normal' });
-    overlay.current?.appendChild(s.canvas); dab.current = { stroke: s, state: newDabState(), fed: 0, sizePx: props.brush.style.sizePx / scale() };
+    const own = props.layer?.kind === 'pixel' ? props.layer : undefined, s = new DabStroke(props.paint.color, props.brush.style), el = document.createElement('div');
+    // The holder shows the stroke the way it will land: at the brush's opacity and only inside the selection.
+    Object.assign(el.style, { opacity: String(props.brush.style.opacity * (own?.opacity ?? 1)), mixBlendMode: own?.blend ?? 'normal', clipPath: props.select.selection ? `path("${props.select.selection.outline}")` : '' });
+    el.appendChild(s.canvas); overlay.current?.appendChild(el); dab.current = { stroke: s, el, state: newDabState(), fed: 0, sizePx: props.brush.style.sizePx / scale() };
   };
+  // Pixel selection tools. Shift held as the drag starts adds, Alt subtracts, both intersect; otherwise the panel's mode applies.
+  const selecting = props.tool.startsWith('marquee'), selectMode = useRef<SelectMode>('new'), heldShift = useRef(false);
+  const modeOf = (e: { shiftKey: boolean; altKey: boolean }): SelectMode => e.shiftKey && e.altKey ? 'intersect' : e.shiftKey ? 'add' : e.altKey ? 'subtract' : props.select.mode;
+  /** Shift constrains a shape, except while it is still held from choosing "add" for a selection. */
+  const constrained = (e: { shiftKey: boolean }) => { if (!e.shiftKey) heldShift.current = false; return e.shiftKey && !(selecting && heldShift.current); };
+  // Transforming selected pixels: they are shown lifted out of the layer while dragged, and land when the pointer lifts.
+  const lift = useRef<Lift | null>(null), [lifted, setLifted] = useState<Matrix | null>(null);
+  const placeLift = (l: Lift) => { if (l.float) l.float.style.transform = `matrix(${l.matrix.join(',')}) translate(${l.sel.rect.x}px, ${l.sel.rect.y}px)`; };
+  const startLift = (sel: PixelSelection, at: Point, handle: Lift['handle'], copy: boolean, skew: boolean) => {
+    const target = props.layer!, box = document.createElement('div');
+    Object.assign(box.style, { opacity: String(target.opacity ?? 1), mixBlendMode: target.blend ?? 'normal' });
+    const l: Lift = lift.current = { sel, origin: at, handle, copy, skew, matrix: IDENTITY, moved: false, box };
+    void props.openPixels().then(async bitmap => {
+      if (!bitmap || lift.current !== l) return;
+      const { rest, float } = await liftPixels(bitmap, sel, copy); if (lift.current !== l) return;
+      Object.assign(rest.style, { left: `${bitmap.x}px`, top: `${bitmap.y}px`, width: `${bitmap.width}px`, height: `${bitmap.height}px` });
+      Object.assign(float.style, { left: '0', top: '0', width: `${sel.rect.width}px`, height: `${sel.rect.height}px`, transformOrigin: '0 0' });
+      box.append(rest, float); overlay.current?.appendChild(box); l.float = float; placeLift(l); setVeiled(target.id);
+    });
+  };
+  const liftMatrix = (l: Lift, e: PointerEvent<SVGSVGElement>): Matrix => {
+    const at = point(e), b = l.sel.rect, delta: Point = [at[0] - l.origin[0], at[1] - l.origin[1]];
+    if (l.handle === 'rotate') {
+      const c: Point = [b.x + b.width / 2, b.y + b.height / 2]; let angle = Math.atan2(at[1] - c[1], at[0] - c[0]) - Math.atan2(l.origin[1] - c[1], l.origin[0] - c[0]);
+      if (e.shiftKey) angle = Math.round(angle / (Math.PI / 12)) * Math.PI / 12;
+      return rotateMatrix(c, angle);
+    }
+    if (l.handle && l.skew && l.handle.length === 1) return skewMatrix(b, l.handle as 'n' | 's' | 'e' | 'w', delta);
+    if (l.handle) { const to = resizeBounds(b, l.handle, delta, e.shiftKey, 1); return fitMatrix(b, { x: Math.round(to.x), y: Math.round(to.y), width: Math.max(1, Math.round(to.width)), height: Math.max(1, Math.round(to.height)) }); }
+    const to = e.shiftKey ? constrainAngle(l.origin, at) : at; return moveMatrix(to[0] - l.origin[0], to[1] - l.origin[1]);
+  };
+  const dropLift = () => { const l = lift.current; if (!l) return; lift.current = null; l.box.remove(); setVeiled(null); setLifted(null); };
   const brushing = props.tool === 'brush' || props.tool === 'eraser';
   // Guides: the first few pixels of a stroke decide whether it follows the ruler, ellipse or a perspective line; steady stroke smooths it.
   const guided = (at: Point): Point => {
@@ -118,7 +162,12 @@ export function SketchCanvas(props: Props) {
   const settle = (step: DraftStep) => {
     if (step.kind === 'continue') updateDraft(step.draft);
     else {
-      if (step.kind === 'commit' && props.tool === 'lasso') {
+      if (selecting) {
+        // A dragged box lands on whole pixels; a click without a drag drops the selection.
+        const whole = (p: Point): Point => props.tool === 'marquee' ? [Math.round(p[0]), Math.round(p[1])] : p;
+        if (step.kind === 'commit') props.select.shape({ id: 'selection', points: step.shape.map(whole), curves: step.curves, closed: true, color: '#000000', widthPx: 1, opacity: 1 }, selectMode.current);
+        else if (selectMode.current === 'new') props.select.none();
+      } else if (step.kind === 'commit' && props.tool === 'lasso') {
         // Lasso select: every editable path with all its anchors inside the loop.
         props.onSelect(editable.filter(p => p.points.every(v => insidePolygon(v, step.shape))).map(p => p.id));
       } else if (step.kind === 'commit') {
@@ -153,6 +202,15 @@ export function SketchCanvas(props: Props) {
       if (path) { if (props.tool === 'eyedropper') props.onPickPaint(path); else if (path.closed) { props.onSelect([path.id]); props.onFill(path); } }
       return;
     }
+    if (props.tool === 'wand') { props.select.wand(at, modeOf(e)); return; }
+    if (props.tool === 'transform') {
+      const sel = props.select.selection, handle = target.getAttribute('data-transform') as ResizeHandle | 'rotate' | null;
+      if (!sel || props.layer?.kind !== 'pixel') { props.select.all(); return; }
+      const b = sel.rect, inside = at[0] >= b.x && at[1] >= b.y && at[0] <= b.x + b.width && at[1] <= b.y + b.height;
+      // Alt-drag moves a copy; Ctrl or Cmd on a side handle skews.
+      if (handle || inside) startLift(sel, at, handle, e.altKey && !handle, e.metaKey || e.ctrlKey);
+      return;
+    }
     if (props.tool === 'trim') {
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
       if (path && !path.text && !path.subpaths?.length) {
@@ -178,8 +236,10 @@ export function SketchCanvas(props: Props) {
       drag.current = { origin: at, paths: members, bounds: b, anchor, ...(node !== null ? { node: Number(node) } : {}), ...(control ? { control } : {}) };
       if (node !== null) props.onNode({ index: control === 'c2' ? (Number(node) + 1) % pathContours(path)[props.contour].points.length : Number(node), ...(control ? { edge: Number(node), control } : {}) });
     } else {
-      const start = snap(at, e.altKey);
-      updateDraft(props.tool === 'pen' ? { ...penPointerDown(draftRef.current, start, options().closeTolerance, options()), penPress: at } : beginDraft(ENGINE_TOOL[props.tool] ?? props.tool as SketchTool, start, e.shiftKey, options()));
+      const engine = ENGINE_TOOL[props.tool] ?? props.tool as SketchTool;
+      if (selecting && !draftRef.current) { selectMode.current = modeOf(e); heldShift.current = e.shiftKey; }
+      const start = selecting ? at : snap(at, e.altKey);
+      updateDraft(engine === 'pen' ? { ...penPointerDown(draftRef.current, start, options().closeTolerance, options()), penPress: at } : beginDraft(engine, start, constrained(e), options()));
     }
   };
   const dragged = (d: Drag, e: PointerEvent<SVGSVGElement>): DrawingPath[] => {
@@ -219,26 +279,33 @@ export function SketchCanvas(props: Props) {
     const at = point(e);
     if (guideDrag.current) { props.onDrawGuides(moveGuide(props.drawGuides, guideDrag.current, at)); return; }
     if (smudge.current) { for (const c of e.nativeEvent.getCoalescedEvents?.() ?? [e.nativeEvent]) smudgeTo(point(c)); return; }
+    if (lift.current) { const l = lift.current; if (l.moved || Math.hypot(at[0] - l.origin[0], at[1] - l.origin[1]) * scale() >= 2) { l.matrix = liftMatrix(l, e); l.moved = true; placeLift(l); setLifted(l.matrix); } return; }
     if (box.current) { const a = box.current.origin; setMarquee({ x: Math.min(a[0], at[0]), y: Math.min(a[1], at[1]), width: Math.abs(a[0] - at[0]), height: Math.abs(a[1] - at[1]) }); }
     else if (drag.current) setPreview(isDrag(drag.current, e) ? dragged(drag.current, e) : []);
     else if (draftRef.current) {
-      const d = draftRef.current, target = d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? at : snap(at, e.altKey);
+      const d = draftRef.current, target = selecting || d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? at : snap(at, e.altKey);
       if (stroke.current && brushing) { for (const c of e.nativeEvent.getCoalescedEvents?.() ?? [e.nativeEvent]) sample(c, point(c)); feedDabs(); }
-      updateDraft(moveDraft(d, stroke.current && d.tool === 'paint' ? guided(target) : target, e.shiftKey));
+      updateDraft(moveDraft(d, stroke.current && d.tool === 'paint' ? guided(target) : target, constrained(e)));
     }
   };
   const up = (e: PointerEvent<SVGSVGElement>) => {
     if (activePointer.current !== e.pointerId) return;
     if (guideDrag.current) { guideDrag.current = null; activePointer.current = null; e.currentTarget.releasePointerCapture(e.pointerId); return; }
     if (smudge.current) endSmudge(true);
+    else if (lift.current) {
+      const l = lift.current;
+      if (!l.moved) dropLift();
+      // The lifted pixels stay in view until the layer's bitmap holds them in their new place.
+      else { lift.current = null; void props.select.transform(l.matrix, l.copy).finally(() => { l.box.remove(); setVeiled(null); setLifted(null); }); }
+    }
     else if (box.current) {
       if (marquee) props.onSelect([...new Set([...box.current.previous, ...editable.filter(p => { const b = pathBounds([p]); return b && boundsContain(marquee, b); }).map(p => p.id)])]);
       box.current = null; setMarquee(null);
     } else if (drag.current) { if (isDrag(drag.current, e)) props.onReplace(dragged(drag.current, e)); drag.current = null; setPreview([]); }
     else if (draftRef.current && stroke.current && dab.current) {
-      feedDabs(); const { stroke: painted } = dab.current, el = painted.canvas; dab.current = null; stroke.current = null; updateDraft(null);
+      feedDabs(); const { stroke: painted, el } = dab.current; dab.current = null; stroke.current = null; updateDraft(null);
       // The stroke canvas stays in view until the layer's bitmap holds it.
-      if (painted.rect) void props.onPaintStroke(el, painted.rect, props.brush.style.opacity, painted.clipped).finally(() => el.remove()); else el.remove();
+      if (painted.rect) void props.onPaintStroke(painted.canvas, painted.rect, props.brush.style.opacity, painted.clipped).finally(() => el.remove()); else el.remove();
     }
     else if (draftRef.current && stroke.current && brushing) {
       const outline = strokeOutline(), samples = stroke.current.samples, style = props.brush.style; stroke.current = null; updateDraft(null);
@@ -250,16 +317,20 @@ export function SketchCanvas(props: Props) {
       else if (props.tool === 'eraser') { const { ids, next } = eraseWith(editable, outline, .5 / scale()); if (ids.length) props.onSplice(ids, next); }
     }
     else if (draftRef.current) {
-      const d = draftRef.current, raw = point(e), at = d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? raw : snap(raw, e.altKey);
-      settle(endDraft(d, stroke.current && d.tool === 'paint' ? guided(at) : at, e.shiftKey)); stroke.current = null;
+      const d = draftRef.current, raw = point(e), at = selecting || d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? raw : snap(raw, e.altKey);
+      settle(endDraft(d, stroke.current && d.tool === 'paint' ? guided(at) : at, constrained(e))); stroke.current = null;
     }
     setGuides([]); activePointer.current = null; e.currentTarget.releasePointerCapture(e.pointerId);
   };
-  const cancel = () => { endSmudge(false); dab.current?.stroke.canvas.remove(); dab.current = null; stroke.current = null; guideDrag.current = null; activePointer.current = null; drag.current = null; box.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
+  const cancel = () => { endSmudge(false); dab.current?.el.remove(); dab.current = null; dropLift(); stroke.current = null; guideDrag.current = null; activePointer.current = null; drag.current = null; box.current = null; setMarquee(null); setPreview([]); updateDraft(null); setGuides([]); };
   useEffect(() => { cancel(); }, [props.resetKey]);
   const key = (e: KeyboardEvent<SVGSVGElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); cancel(); e.shiftKey ? props.redo() : props.undo(); return; }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); props.onSelect(editable.map(p => p.id)); return; }
+    // On a pixel layer Select All, Deselect and Invert work on the pixel selection.
+    const pixel = props.layer?.kind === 'pixel', mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key.toLowerCase() === 'a') { e.preventDefault(); if (pixel) props.select.all(); else props.onSelect(editable.map(p => p.id)); return; }
+    if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); props.select.none(); return; }
+    if (mod && e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); props.select.invert(); return; }
     // Esc ends a pen path where it is, like Illustrator and Affinity, instead of discarding it.
     if (e.key === 'Escape') { if (draftRef.current?.tool === 'pen' && activePointer.current === null) settle(finishPen(draftRef.current, false)); cancel(); return; }
     if (e.key === 'Enter' && draftRef.current) { e.preventDefault(); settle(finishPen(draftRef.current, e.shiftKey)); return; }
@@ -267,6 +338,11 @@ export function SketchCanvas(props: Props) {
     const k = e.key.toLowerCase(), own: EditorTool | undefined = k === 'b' ? (e.shiftKey ? 'paint' : 'brush') : e.shiftKey && k === 'e' ? 'eraser' : e.shiftKey ? undefined : ({ h: 'hand', z: 'zoom', q: 'lasso' } as Record<string, EditorTool | undefined>)[k];
     if (!e.metaKey && !e.ctrlKey && !e.altKey && own) { e.preventDefault(); cancel(); props.onTool(own); return; }
     if (!e.metaKey && !e.ctrlKey && !e.altKey && TOOL_SHORTCUTS[e.key.toLowerCase()]) { e.preventDefault(); cancel(); props.onTool(TOOL_SHORTCUTS[e.key.toLowerCase()]); return; }
+    const delta: Record<string, Point> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (pixel && canEdit && props.select.selection && !mod) {
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); props.select.clear(); return; }
+      if (delta[e.key] && props.tool === 'transform') { e.preventDefault(); const k = e.shiftKey ? 10 : 1; void props.select.transform(moveMatrix(delta[e.key][0] * k, delta[e.key][1] * k), false); return; }
+    }
     if (!canEdit || !shown.length) return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
@@ -276,7 +352,6 @@ export function SketchCanvas(props: Props) {
         props.onNode(null);
       } else props.onDelete();
     }
-    const delta: Record<string, Point> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     if (delta[e.key]) {
       e.preventDefault(); const [x, y] = delta[e.key], amount = e.shiftKey ? 10 : 1;
       const map = (p: Point): Point => [p[0] + x * amount, p[1] + y * amount];
@@ -331,6 +406,11 @@ export function SketchCanvas(props: Props) {
         <line x1={bounds.x + bounds.width / 2} y1={bounds.y} x2={bounds.x + bounds.width / 2} y2={bounds.y - pin * 7} vectorEffect="non-scaling-stroke" pointerEvents="none" />
         <circle data-transform="rotate" aria-label="Rotate selection handle" cx={bounds.x + bounds.width / 2} cy={bounds.y - pin * 7} r={pin * 1.3} />
       </g>}
+      {props.tool === 'transform' && props.select.selection && canEdit && props.layer?.kind === 'pixel' && !lifted && (b => <g className="sketch-nodes" aria-label="Pixel selection transform">
+        {RESIZE_HANDLES.map(h => { const p = handlePoint(b, h); return <rect key={h} data-transform={h} aria-label={`Resize ${h}`} x={p[0] - pin} y={p[1] - pin} width={pin * 2} height={pin * 2} />; })}
+        <line x1={b.x + b.width / 2} y1={b.y} x2={b.x + b.width / 2} y2={b.y - pin * 7} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+        <circle data-transform="rotate" aria-label="Rotate selection handle" cx={b.x + b.width / 2} cy={b.y - pin * 7} r={pin * 1.3} />
+      </g>)(props.select.selection.rect)}
       {selected && canEdit && props.tool === 'node' && <g data-path-id={selected.id} className="sketch-nodes">
         {selected.curves?.map((c, i) => c && (selected.closed || i < selected.points.length - 1) && <g key={i}>
           {(['c1', 'c2'] as const).map(control => { const a = selected.points[control === 'c1' ? i : (i + 1) % selected.points.length]; return <g key={control}>
@@ -341,5 +421,9 @@ export function SketchCanvas(props: Props) {
         </g>)}
         {selected.points.map((p, i) => <rect key={i} data-node={i} aria-label={`Anchor ${i + 1}`} x={p[0] - pin} y={p[1] - pin} width={pin * 2} height={pin * 2} className={props.node?.index === i ? 'active' : ''} />)}
       </g>}
-    </svg><div ref={overlay} className="sketch-pixel-overlay" aria-hidden="true" /></>;
+    </svg><div ref={overlay} className="sketch-pixel-overlay" aria-hidden="true" />
+    {/* Marching ants in an svg of their own, so their animation never repaints the drawing. */}
+    {props.select.selection && <svg className="sketch-ants" aria-label="Pixel selection" width={1} height={1} overflow="visible">
+      <g transform={lifted ? `matrix(${lifted.join(' ')})` : undefined}><path d={props.select.selection.outline} vectorEffect="non-scaling-stroke" /><path className="sketch-ants-march" d={props.select.selection.outline} vectorEffect="non-scaling-stroke" /></g>
+    </svg>}</>;
 }
