@@ -15,6 +15,7 @@ import type { NodeSelection, SnapSettings } from './VectorInspector';
 import { brushOpacity, brushOutline, eraseWith, type BrushSample, type BrushStyle } from './brush';
 import { steadyPoint, strokeConstraint, type Guides } from './guides';
 import { GuideOverlay, moveGuide } from './GuideOverlay';
+import { joinOpenPath } from './join';
 export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'star' | 'lasso' | 'hand' | 'zoom';
 /** A star from a regular polygon's corners: an inner point between each pair, at half the outer radius. */
 export function starShape(corners: Point[]): Point[] {
@@ -84,7 +85,11 @@ export function SketchCanvas(props: Props) {
         const shape = props.tool === 'star' ? starShape(step.shape) : step.shape;
         const path: DrawingPath = { id: crypto.randomUUID(), points: shape, curves: props.tool === 'star' ? undefined : step.curves, nodeModes: props.tool === 'star' ? undefined : step.nodeModes,
           closed: step.closed ?? (props.tool !== 'paint' && props.tool !== 'line'), ...props.paint };
-        props.onAdd(path); props.onSelect([path.id]); props.onNode(null);
+        // Lines and pen paths that meet a free end continue that path (and close it on its start).
+        // ponytail: not with symmetry on, where each mirrored copy would need its own join.
+        const joined = (props.tool === 'line' || props.tool === 'pen') && !props.drawGuides.symmetry ? joinOpenPath(path, editable, options().closeTolerance) : { path, removed: [] };
+        if (joined.removed.length) props.onSplice(joined.removed, [joined.path]); else props.onAdd(path);
+        props.onSelect([joined.path.id]); props.onNode(null);
       }
       updateDraft(null); setGuides([]);
     }
@@ -205,7 +210,8 @@ export function SketchCanvas(props: Props) {
   const key = (e: KeyboardEvent<SVGSVGElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); cancel(); e.shiftKey ? props.redo() : props.undo(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); props.onSelect(editable.map(p => p.id)); return; }
-    if (e.key === 'Escape') { cancel(); return; }
+    // Esc ends a pen path where it is, like Illustrator and Affinity, instead of discarding it.
+    if (e.key === 'Escape') { if (draftRef.current?.tool === 'pen' && activePointer.current === null) settle(finishPen(draftRef.current, false)); cancel(); return; }
     if (e.key === 'Enter' && draftRef.current) { e.preventDefault(); settle(finishPen(draftRef.current, e.shiftKey)); return; }
     // B brush, Shift+B pencil, Shift+E eraser (Illustrator's keys where they do not clash with the engine's).
     const k = e.key.toLowerCase(), own: EditorTool | undefined = k === 'b' ? (e.shiftKey ? 'paint' : 'brush') : e.shiftKey && k === 'e' ? 'eraser' : e.shiftKey ? undefined : ({ h: 'hand', z: 'zoom', q: 'lasso' } as Record<string, EditorTool | undefined>)[k];
