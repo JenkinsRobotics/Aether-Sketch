@@ -1,9 +1,10 @@
 import { textSVG } from './text';
-import { gradientVector, pathBounds, pathData, strokeDash, transformPath } from '@aether/sketch';
+import { gradientVector, pathBounds, pathData, transformPath } from '@aether/sketch';
+import { arrowHeads, dashArray } from './vector';
 import { ancestors, pathLocked, pathVisible } from './structure';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pixelBounds, unionRect } from './pixels';
-export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash'] as const;
+export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash', 'dashPx', 'arrowStart', 'arrowEnd'] as const;
 export type PaintStyle = Pick<DrawingPath, typeof paintKeys[number]>;
 export const defaultPaint: PaintStyle = { color: '#2368ce', fill: '#bcd4f5', widthPx: 3, opacity: 1, fillOpacity: 1, strokeOpacity: 1, strokeEnabled: true, lineCap: 'round', lineJoin: 'round', dash: 'solid' };
 export const copyPaint = (p: PaintStyle): PaintStyle => Object.fromEntries(paintKeys.map(key => [key, p[key]])) as PaintStyle;
@@ -15,7 +16,7 @@ export function paintAttributes(p: DrawingPath, gradientID: string) {
     stroke: p.strokeEnabled === false ? 'none' : p.color, strokeWidth: p.widthPx,
     strokeOpacity: p.strokeOpacity ?? 1, opacity: p.opacity,
     strokeLinecap: p.lineCap ?? 'round', strokeLinejoin: p.lineJoin ?? 'round',
-    strokeDasharray: strokeDash(p.dash, p.widthPx)?.join(' '),
+    strokeDasharray: dashArray(p)?.join(' '),
     filter: p.blurPx ? `url(#${gradientID.replace(/-gradient$/, '-blur')})` : undefined,
   };
 }
@@ -90,8 +91,9 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string 
   const body = [...doc.layers].reverse().map((l, index) => {
     const shown = { ...l, visible: true };
     const markup = l.paths.filter(p => pathVisible(shown, p)).map(p => {
-      const attrs = Object.entries(paintAttributes(p, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
-      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>`));
+      const attributes = (path: DrawingPath) => Object.entries(paintAttributes(path, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
+      const attrs = attributes(p), heads = arrowHeads(p).map(head => `<path d="${pathData(head)}" ${attributes(head)}/>`).join('');
+      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>${heads}`));
     }).join('');
     const b = l.pixels, bitmap = b ? `<image href="${b.src}" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" preserveAspectRatio="none"/>` : '';
     const style = [l.visible ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');

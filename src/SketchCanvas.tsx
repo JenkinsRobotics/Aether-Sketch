@@ -18,8 +18,10 @@ import type { PixelBitmap } from './document';
 import { steadyPoint, strokeConstraint, symmetryMaps, type Guides } from './guides';
 import { GuideOverlay, moveGuide } from './GuideOverlay';
 import { joinOpenPath } from './join';
+import { arrowHeads, cornerIndices, roundCorners, type CornerStyle } from './vector';
+import type { SketchPath } from '@aether/sketch';
 export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'smudge' | 'star' | 'lasso' | 'hand' | 'zoom'
-  | 'marquee' | 'marquee-ellipse' | 'marquee-lasso' | 'marquee-polygon' | 'wand' | 'transform';
+  | 'marquee' | 'marquee-ellipse' | 'marquee-lasso' | 'marquee-polygon' | 'wand' | 'transform' | 'corner' | 'shape' | 'knife';
 /** A star from a regular polygon's corners: an inner point between each pair, at half the outer radius. */
 export function starShape(corners: Point[]): Point[] {
   const c: Point = [corners.reduce((n, p) => n + p[0], 0) / corners.length, corners.reduce((n, p) => n + p[1], 0) / corners.length], k = .5 / Math.cos(Math.PI / corners.length);
@@ -31,7 +33,8 @@ export function insidePolygon(p: Point, ring: Point[]) {
   return inside;
 }
 // The pixel selection tools borrow the engine's drafts: a dragged box or ellipse, a freehand loop, and the pen for a polygon.
-const ENGINE_TOOL: Partial<Record<EditorTool, SketchTool>> = { star: 'polygon', lasso: 'freehand', marquee: 'rect', 'marquee-ellipse': 'ellipse', 'marquee-lasso': 'freehand', 'marquee-polygon': 'pen' };
+// A library shape is drawn by dragging its box, and the knife by dragging its cut line.
+const ENGINE_TOOL: Partial<Record<EditorTool, SketchTool>> = { star: 'polygon', lasso: 'freehand', shape: 'rect', knife: 'line', marquee: 'rect', 'marquee-ellipse': 'ellipse', 'marquee-lasso': 'freehand', 'marquee-polygon': 'pen' };
 /** The pixel selection and what the canvas can do with it. Selecting works on any layer; clearing and transforming need a pixel layer. */
 export interface PixelSelect {
   selection: PixelSelection | null; mode: SelectMode;
@@ -55,6 +58,8 @@ interface Props {
   openPixels: () => Promise<PixelBitmap | undefined>; onSmudged: (layerID: string, stroke: SmudgeStroke) => Promise<void>;
   pixelBrush: boolean; onPaintStroke: (stroke: HTMLCanvasElement, rect: Rect, opacity: number, clipped: boolean) => Promise<void>;
   select: PixelSelect;
+  /** The library shape to draw in a dragged box; how the corner tool finishes a corner; what the knife's cut line does. */
+  makeShape: (box: Bounds) => SketchPath; cornerStyle: CornerStyle; onKnife: (a: Point, b: Point) => void;
   pending: { layerID: string; paths: DrawingPath[] }[]; onErasePixels: (outline: Point[]) => void; onPixelPoint: (tool: 'fill' | 'eyedropper', at: Point) => void;
   onSplice: (ids: string[], paths: DrawingPath[]) => void; onDelete: () => void; undo: () => void; redo: () => void;
 }
@@ -167,13 +172,16 @@ export function SketchCanvas(props: Props) {
         const whole = (p: Point): Point => props.tool === 'marquee' ? [Math.round(p[0]), Math.round(p[1])] : p;
         if (step.kind === 'commit') props.select.shape({ id: 'selection', points: step.shape.map(whole), curves: step.curves, closed: true, color: '#000000', widthPx: 1, opacity: 1 }, selectMode.current);
         else if (selectMode.current === 'new') props.select.none();
-      } else if (step.kind === 'commit' && props.tool === 'lasso') {
+      } else if (step.kind === 'commit' && props.tool === 'knife') props.onKnife(step.shape[0], step.shape[step.shape.length - 1]);
+      else if (step.kind === 'commit' && props.tool === 'lasso') {
         // Lasso select: every editable path with all its anchors inside the loop.
         props.onSelect(editable.filter(p => p.points.every(v => insidePolygon(v, step.shape))).map(p => p.id));
       } else if (step.kind === 'commit') {
         const shape = props.tool === 'star' ? starShape(step.shape) : step.shape;
-        const path: DrawingPath = { id: crypto.randomUUID(), points: shape, curves: props.tool === 'star' ? undefined : step.curves, nodeModes: props.tool === 'star' ? undefined : step.nodeModes,
-          closed: step.closed ?? (props.tool !== 'paint' && props.tool !== 'line'), ...props.paint };
+        const box = props.tool === 'shape' ? pathBounds([{ points: shape, closed: true }]) : null;
+        const path: DrawingPath = box ? { id: crypto.randomUUID(), ...props.makeShape(box), closed: true, ...props.paint }
+          : { id: crypto.randomUUID(), points: shape, curves: props.tool === 'star' ? undefined : step.curves, nodeModes: props.tool === 'star' ? undefined : step.nodeModes,
+            closed: step.closed ?? (props.tool !== 'paint' && props.tool !== 'line'), ...props.paint };
         // Lines and pen paths that meet a free end continue that path (and close it on its start).
         // ponytail: not with symmetry on, where each mirrored copy would need its own join.
         const joined = props.joinPaths && (props.tool === 'line' || props.tool === 'pen') && !props.drawGuides.symmetry ? joinOpenPath(path, editable, options().closeTolerance) : { path, removed: [] };
@@ -219,7 +227,7 @@ export function SketchCanvas(props: Props) {
       }
       return;
     }
-    if (props.tool === 'select' || props.tool === 'node') {
+    if (props.tool === 'select' || props.tool === 'node' || props.tool === 'corner') {
       const transform = target.getAttribute('data-transform') as ResizeHandle | 'rotate' | null;
       if (transform && bounds) { drag.current = { origin: at, paths: selectedPaths, bounds, handle: transform, anchor: at }; return; }
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
@@ -228,7 +236,7 @@ export function SketchCanvas(props: Props) {
       const group = props.layer && rootGroup(props.layer, path);
       if (group && props.tool === 'select' && !e.altKey && groupPaths(props.layer!, group).some(p => pathLocked(props.layer!, p))) return;
       const picked = group && props.tool === 'select' && !e.altKey ? groupPaths(props.layer!, group).filter(p => !pathLocked(props.layer!, p) && pathVisible(props.layer!, p)).map(p => p.id) : [path.id];
-      const ids = props.tool === 'node' ? [path.id] : e.shiftKey ? picked.every(id => props.selected.includes(id)) ? props.selected.filter(id => !picked.includes(id)) : [...new Set([...props.selected, ...picked])] : picked.every(id => props.selected.includes(id)) ? props.selected : picked;
+      const ids = props.tool !== 'select' ? [path.id] : e.shiftKey ? picked.every(id => props.selected.includes(id)) ? props.selected.filter(id => !picked.includes(id)) : [...new Set([...props.selected, ...picked])] : picked.every(id => props.selected.includes(id)) ? props.selected : picked;
       props.onSelect(ids); if (!ids.includes(path.id)) return;
       const members = editable.filter(p => ids.includes(p.id)), b = pathBounds(members)!;
       const node = target.getAttribute('data-node'), control = target.getAttribute('data-control') as 'c1' | 'c2' | null;
@@ -257,6 +265,8 @@ export function SketchCanvas(props: Props) {
     }
     if (d.node !== undefined) {
       const full = d.paths[0], p = pathContours(full)[props.contour];
+      // Corner tool: the further the corner is dragged, the larger its radius; Shift rounds every corner alike.
+      if (props.tool === 'corner') { setGuides([]); return [{ ...full, ...replaceContour(full, props.contour, roundCorners(p, Math.hypot(at[0] - p.points[d.node][0], at[1] - p.points[d.node][1]), props.cornerStyle, e.shiftKey ? undefined : [d.node])) }]; }
       if (d.control) {
         const anchor = p.points[d.control === 'c1' ? d.node : (d.node + 1) % p.points.length];
         if (e.shiftKey) at = constrainAngle(anchor, at);
@@ -281,7 +291,7 @@ export function SketchCanvas(props: Props) {
     if (smudge.current) { for (const c of e.nativeEvent.getCoalescedEvents?.() ?? [e.nativeEvent]) smudgeTo(point(c)); return; }
     if (lift.current) { const l = lift.current; if (l.moved || Math.hypot(at[0] - l.origin[0], at[1] - l.origin[1]) * scale() >= 2) { l.matrix = liftMatrix(l, e); l.moved = true; placeLift(l); setLifted(l.matrix); } return; }
     if (box.current) { const a = box.current.origin; setMarquee({ x: Math.min(a[0], at[0]), y: Math.min(a[1], at[1]), width: Math.abs(a[0] - at[0]), height: Math.abs(a[1] - at[1]) }); }
-    else if (drag.current) setPreview(isDrag(drag.current, e) ? dragged(drag.current, e) : []);
+    else if (drag.current) setPreview(isDrag(drag.current, e) && (props.tool !== 'corner' || drag.current.node !== undefined) ? dragged(drag.current, e) : []);
     else if (draftRef.current) {
       const d = draftRef.current, target = selecting || d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? at : snap(at, e.altKey);
       if (stroke.current && brushing) { for (const c of e.nativeEvent.getCoalescedEvents?.() ?? [e.nativeEvent]) sample(c, point(c)); feedDabs(); }
@@ -301,7 +311,12 @@ export function SketchCanvas(props: Props) {
     else if (box.current) {
       if (marquee) props.onSelect([...new Set([...box.current.previous, ...editable.filter(p => { const b = pathBounds([p]); return b && boundsContain(marquee, b); }).map(p => p.id)])]);
       box.current = null; setMarquee(null);
-    } else if (drag.current) { if (isDrag(drag.current, e)) props.onReplace(dragged(drag.current, e)); drag.current = null; setPreview([]); }
+    } else if (drag.current) {
+      // With the corner tool only a dragged corner changes anything; the path itself never moves.
+      const d = drag.current, act = isDrag(d, e) && (props.tool !== 'corner' || d.node !== undefined);
+      if (act) props.onReplace(dragged(d, e)); if (act && props.tool === 'corner') props.onNode(null);
+      drag.current = null; setPreview([]);
+    }
     else if (draftRef.current && stroke.current && dab.current) {
       feedDabs(); const { stroke: painted, el } = dab.current; dab.current = null; stroke.current = null; updateDraft(null);
       // The stroke canvas stays in view until the layer's bitmap holds it.
@@ -386,6 +401,7 @@ export function SketchCanvas(props: Props) {
           {...paintAttributes({ ...p, fill: p.fillGradient?.stops[0]?.color ?? p.fill, fillGradient: undefined, blurPx: undefined }, '')} style={p.blurPx ? { filter: `blur(${p.blurPx}px)` } : undefined} />)}
         {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p; const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
           {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(path, `${ids.get(p.id)}-gradient`)} />}
+          {arrowHeads(path).map(head => <path key={head.id} data-arrow-head="true" pointerEvents="none" d={pathData(head)} {...paintAttributes(head, '')} />)}
           <path d={pathData(path)} fill={path.text ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale())} />
           {props.selected.includes(p.id) && l.id === props.layer?.id && <path className="sketch-selection" d={pathData(path)} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
         </g>;
@@ -397,7 +413,8 @@ export function SketchCanvas(props: Props) {
       {draft && brushing && !dab.current && <path className={`sketch-brush-preview${props.tool === 'eraser' ? ' sketch-eraser-preview' : ''}`} d={`M${strokeOutline().map(p => p.join(',')).join('L')}Z`} fill={props.tool === 'brush' ? props.paint.color : undefined} pointerEvents="none"
         // The stroke in progress already looks like the finished one: same opacity, same soft edge.
         {...(props.tool === 'brush' && stroke.current ? { opacity: brushOpacity(props.brush.style, stroke.current.samples), style: props.brush.style.softness > 0 ? { filter: `blur(${props.brush.style.softness * props.brush.style.sizePx / scale() * .35}px)` } : undefined } : {})} />}
-      {draft && !brushing && <polyline className="sketch-draft" points={(draft.tool === 'paint' ? draft.points : props.tool === 'star' ? starShape(previewShape(draft)) : previewShape(draft)).map(p => p.join(',')).join(' ')} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+      {draft && props.tool === 'shape' && (box => box && <path className="sketch-draft" d={pathData({ ...props.makeShape(box), closed: true })} fill="none" fillRule="evenodd" vectorEffect="non-scaling-stroke" pointerEvents="none" />)(pathBounds([{ points: previewShape(draft), closed: true }]))}
+      {draft && !brushing && props.tool !== 'shape' && <polyline className="sketch-draft" points={(draft.tool === 'paint' ? draft.points : props.tool === 'star' ? starShape(previewShape(draft)) : previewShape(draft)).map(p => p.join(',')).join(' ')} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
       {guides.map((g, i) => <g className="sketch-snap-guide" key={i} pointerEvents="none" aria-label={`Snap ${g.label}`}><line x1={g.from[0]} y1={g.from[1]} x2={g.to[0]} y2={g.to[1]} vectorEffect="non-scaling-stroke" /><circle cx={g.to[0]} cy={g.to[1]} r={pin * 1.5} vectorEffect="non-scaling-stroke" /><text x={g.to[0] + pin * 2} y={g.to[1] - pin * 2} fontSize={11 / scale()}>{g.label}</text></g>)}
       {draft?.tangents?.map((t, i) => { const p = draft.points[i]; return <g key={i} className="sketch-tangent" pointerEvents="none"><line x1={p[0] - t[0]} y1={p[1] - t[1]} x2={p[0] + t[0]} y2={p[1] + t[1]} vectorEffect="non-scaling-stroke" /><circle cx={p[0] + t[0]} cy={p[1] + t[1]} r={pin} /></g>; })}
       {bounds && canEdit && props.tool === 'select' && <g className="sketch-nodes" aria-label="Selection transform">
@@ -411,6 +428,9 @@ export function SketchCanvas(props: Props) {
         <line x1={b.x + b.width / 2} y1={b.y} x2={b.x + b.width / 2} y2={b.y - pin * 7} vectorEffect="non-scaling-stroke" pointerEvents="none" />
         <circle data-transform="rotate" aria-label="Rotate selection handle" cx={b.x + b.width / 2} cy={b.y - pin * 7} r={pin * 1.3} />
       </g>)(props.select.selection.rect)}
+      {selected && canEdit && props.tool === 'corner' && !preview.length && <g data-path-id={selected.id} className="sketch-nodes" aria-label="Corners">
+        {cornerIndices(selected).map(i => <circle key={i} data-node={i} aria-label={`Corner ${i + 1}`} cx={selected.points[i][0]} cy={selected.points[i][1]} r={pin * 1.2} />)}
+      </g>}
       {selected && canEdit && props.tool === 'node' && <g data-path-id={selected.id} className="sketch-nodes">
         {selected.curves?.map((c, i) => c && (selected.closed || i < selected.points.length - 1) && <g key={i}>
           {(['c1', 'c2'] as const).map(control => { const a = selected.points[control === 'c1' ? i : (i + 1) % selected.points.length]; return <g key={control}>

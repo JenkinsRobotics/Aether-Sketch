@@ -1,4 +1,5 @@
 import { pathContours, type SketchPath } from '@aether/sketch';
+import { arrowHeads, dashArray } from './vector';
 import { clipPaths, drawingSVG, exportArea } from './paint';
 import { pathVisible } from './structure';
 import { textMatrix } from './text';
@@ -55,7 +56,7 @@ export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Ar
     const fillHex = p.fillGradient?.stops[0]?.color ?? p.fill ?? p.color;
     const ops = [state((p.fillOpacity ?? (p.fill === undefined ? .15 : 1)) * p.opacity, (p.strokeOpacity ?? 1) * p.opacity), `${rgb(fillHex)} rg ${rgb(p.color)} RG ${num(p.widthPx)} w`,
       `${{ butt: 0, round: 1, square: 2 }[p.lineCap ?? 'round']} J ${{ miter: 0, round: 1, bevel: 2 }[p.lineJoin ?? 'round']} j`,
-      p.dash === 'dashed' ? `[${num(p.widthPx * 4)} ${num(p.widthPx * 2)}] 0 d` : p.dash === 'dotted' ? `[${num(p.widthPx)} ${num(p.widthPx * 2)}] 0 d` : '[] 0 d'];
+      `[${(dashArray(p) ?? []).map(num).join(' ')}] 0 d`];
     for (const clip of clipPaths(layer, p)) ops.push(`${contourOps(clip)} W${clip.fillRule === 'evenodd' ? '*' : ''} n`);
     if (p.text) {
       // ponytail: Helvetica (a PDF base font) with ASCII text; embed fonts if documents need other scripts.
@@ -67,7 +68,7 @@ export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Ar
     } else ops.push(`${contourOps(p)} ${fill && stroke ? 'B' : fill ? 'f' : 'S'}${fill && p.fillRule === 'evenodd' ? '*' : ''}`);
     return `q ${ops.join(' ')} Q`;
   };
-  const layers = [...doc.layers].reverse().filter(l => l.visible).map(l => ({ layer: l, content: l.paths.filter(p => pathVisible(l, p)).map(p => shape(p, l)).filter(Boolean).join('\n') }));
+  const layers = [...doc.layers].reverse().filter(l => l.visible).map(l => ({ layer: l, content: l.paths.filter(p => pathVisible(l, p)).flatMap(p => [p, ...arrowHeads(p)]).map(p => shape(p, l)).filter(Boolean).join('\n') }));
   const page = layers.map(({ layer }, i) => `q ${state(layer.opacity ?? 1, layer.opacity ?? 1, PDF_BLEND[layer.blend ?? 'normal'])} /L${i} Do Q`).join('\n');
   const matrix = `${num(s)} 0 0 ${num(-s)} ${num(-area.x * s)} ${num((area.y + area.height) * s)}`;
   const width = num(area.width * s), height = num(area.height * s);

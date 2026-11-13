@@ -2,6 +2,7 @@ import { Button, Checkbox, ColorField, GradientControls, FieldRow, NumberField, 
 import type { VectorGradient } from '@aether/sketch';
 import type { DrawingPath } from './document';
 import type { PaintStyle } from './paint';
+import { ARROW_HEADS } from './vector';
 export function VectorPaintPanel({ value, disabled, onChange, selected, inside, onInside, onRelease, canRelease }: {
   value: PaintStyle; disabled: boolean; onChange: (patch: Partial<PaintStyle>) => void;
   selected?: DrawingPath; inside: boolean; onInside: () => void; onRelease: () => void; canRelease: boolean;
@@ -18,11 +19,17 @@ export function VectorPaintPanel({ value, disabled, onChange, selected, inside, 
     <FieldRow label="Stroke"><ColorField value={value.color} onChange={color => onChange({ color })} ariaLabel="Stroke color" /></FieldRow>
     <FieldRow label="Stroke width"><NumberField aria-label="Stroke width" value={value.widthPx} min={.1} max={200} unit="px" onCommit={widthPx => onChange({ widthPx })} /></FieldRow>
     <FieldRow label="Stroke opacity"><NumberField aria-label="Stroke opacity" value={(value.strokeOpacity ?? 1) * 100} min={0} max={100} unit="%" onCommit={v => onChange({ strokeOpacity: v / 100 })} /></FieldRow>
-    {(['lineCap', 'lineJoin', 'dash'] as const).map(key => <FieldRow key={key} label={{ lineCap: 'Line caps', lineJoin: 'Line joins', dash: 'Stroke pattern' }[key]}>
-      <SelectField aria-label={key} value={value[key] ?? (key === 'dash' ? 'solid' : 'round')}
-        options={(key === 'lineCap' ? ['butt', 'round', 'square'] : key === 'lineJoin' ? ['miter', 'round', 'bevel'] : ['solid', 'dashed', 'dotted']).map(value => ({ value, label: value }))}
+    {(['lineCap', 'lineJoin'] as const).map(key => <FieldRow key={key} label={{ lineCap: 'Line caps', lineJoin: 'Line joins' }[key]}>
+      <SelectField aria-label={key} value={value[key] ?? 'round'} options={(key === 'lineCap' ? ['butt', 'round', 'square'] : ['miter', 'round', 'bevel']).map(value => ({ value, label: value }))}
         onChange={e => onChange({ [key]: e.target.value })} />
     </FieldRow>)}
+    <FieldRow label="Stroke pattern"><SelectField aria-label="dash" value={value.dashPx ? 'custom' : value.dash ?? 'solid'} options={['solid', 'dashed', 'dotted', 'custom'].map(value => ({ value, label: value }))}
+      onChange={e => onChange(e.target.value === 'custom' ? { dashPx: [value.widthPx * 4, value.widthPx * 2] } : { dash: e.target.value as 'solid' | 'dashed' | 'dotted', dashPx: undefined })} /></FieldRow>
+    {value.dashPx && (['Dash', 'Gap'] as const).map((label, i) => <FieldRow key={label} label={`${label} length`}><NumberField aria-label={`${label} length`} value={value.dashPx![i]} min={.1} max={10000} unit="px"
+      onCommit={v => onChange({ dashPx: i ? [value.dashPx![0], v] : [v, value.dashPx![1]] })} /></FieldRow>)}
+    {(['arrowStart', 'arrowEnd'] as const).map(key => <FieldRow key={key} label={key === 'arrowStart' ? 'Start of line' : 'End of line'}>
+      <SelectField aria-label={key === 'arrowStart' ? 'Arrowhead at start' : 'Arrowhead at end'} value={value[key] ?? 'none'} options={[{ value: 'none', label: 'none' }, ...ARROW_HEADS.map(value => ({ value, label: value }))]}
+        onChange={e => onChange({ [key]: e.target.value === 'none' ? undefined : e.target.value })} /></FieldRow>)}
     <FieldRow label="Object opacity"><NumberField aria-label="Object opacity" value={value.opacity * 100} min={0} max={100} unit="%" onCommit={v => onChange({ opacity: v / 100 })} /></FieldRow>
     <Button active={inside} disabled={!inside && (!selected?.closed || !!selected.text)} onClick={onInside}>{inside ? 'Finish drawing inside' : 'Draw inside selected shape'}</Button>
     {canRelease && <Button onClick={onRelease}>Release clipping</Button>}

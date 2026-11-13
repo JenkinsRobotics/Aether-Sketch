@@ -43,6 +43,9 @@ import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, ne
 import { clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
   type Matrix, type PixelResult, type PixelSelection, type Rect, type SelectMode, type SelectionResult } from './pixels';
 import { useDocument } from './useDocument';
+import { SHAPES, knifePath, makeShape, roundAllCorners, type CornerStyle } from './vector';
+import { pathData } from '@aether/sketch';
+import { Button, NumberField } from '@aether/ui';
 import './sketch.css';
 /** Every drawing tool, with a name and a recognisable icon. Keys: V select, H hand, Z zoom, B brush, Shift+B pencil,
  * Shift+E eraser, N lasso fill, P pen, L line, M rectangle, E ellipse, G polygon, A edit nodes, Q lasso select. */
@@ -62,16 +65,18 @@ const TOOL_INFO: Record<EditorTool, { label: string; icon: ReactNode }> = {
   marquee: { label: 'Rectangle select', icon: <AetherIcon name="rectangle-dashed" /> }, 'marquee-ellipse': { label: 'Ellipse select', icon: <AetherIcon name="circle-dashed" /> },
   'marquee-lasso': { label: 'Freehand select', icon: <AetherIcon name="lasso" /> }, 'marquee-polygon': { label: 'Polygon select', icon: <AetherIcon name="hexagon" /> },
   wand: { label: 'Magic wand: select by colour', icon: <AetherIcon name="sparkles" /> }, transform: { label: 'Move and transform pixels', icon: <AetherIcon name="move" /> },
+  corner: { label: 'Corner: drag a corner to round it', icon: <ToolIcon name="fillet" /> }, shape: { label: 'Shape library', icon: <ToolIcon name="smart-shape" /> },
+  knife: { label: 'Knife: drag a line to cut shapes', icon: <ToolIcon name="cut" /> },
   lasso: { label: 'Lasso select (Q)', icon: <AetherIcon name="lasso" /> }, node: { label: 'Edit nodes (A)', icon: <AetherIcon name="node-select" /> }, trim: { label: 'Trim at crossings', icon: <AetherIcon name="scissors" /> },
 };
 /** The tool bar's tabs: drawing first, then shapes, then editing. Guides live in the center tray, board items in the environment tray. */
 const TOOL_TABS: { id: string; label: string; groups: { id: string; label: string; tools: EditorTool[] }[] }[] = [
   { id: 'draw', label: 'Draw', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'hand', 'zoom'] }, { id: 'brushes', label: 'Brushes', tools: ['brush', 'paint', 'eraser', 'smudge'] },
     { id: 'colour', label: 'Fill and colour', tools: ['fill', 'freehand', 'eyedropper'] }] },
-  { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
-  { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
-  { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint', 'brush'] },
-    { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'paint', label: 'Paint', tools: ['fill', 'eyedropper'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
+  { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star', 'shape'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
+  { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'corner', 'trim', 'knife'] }] },
+  { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'corner', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint', 'brush'] },
+    { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star', 'shape'] }, { id: 'cut', label: 'Cut', tools: ['trim', 'knife'] }, { id: 'paint', label: 'Paint', tools: ['fill', 'eyedropper'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
   { id: 'select', label: 'Select', groups: [{ id: 'marquee', label: 'Select pixels', tools: ['marquee', 'marquee-ellipse', 'marquee-lasso', 'marquee-polygon', 'wand'] }, { id: 'move', label: 'Move', tools: ['transform'] }] },
 ];
 const SELECT_MODES: { value: SelectMode; label: string }[] = [{ value: 'new', label: 'New selection' }, { value: 'add', label: 'Add to selection' }, { value: 'subtract', label: 'Subtract from selection' }, { value: 'intersect', label: 'Intersect with selection' }];
@@ -214,6 +219,19 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     return pixelQueue.current;
   };
   // ---- Pixel selection: where pixel edits land, and what Move and transform works on. Not part of the drawing file. ----
+  // ---- Vector tools: the shape library, the corner tool and the knife. ----
+  const [shapeID, setShapeID] = useState(SHAPES[0].id), [shapeAmounts, setShapeAmounts] = useState<Record<string, number>>({}), [corner, setCorner] = useState<{ radius: number; style: CornerStyle }>({ radius: 20, style: 'round' });
+  const shapeKind = SHAPES.find(k => k.id === shapeID) ?? SHAPES[0], shapeAmount = shapeAmounts[shapeKind.id] ?? shapeKind.amount?.value ?? 0;
+  /** The knife cuts the selected paths, or with nothing selected every path on the layer that its line crosses. */
+  const knife = (a: [number, number], b: [number, number]) => {
+    if (layer.locked || !layer.visible) return;
+    const cut = new Map((chosen.length ? chosen : layer.paths).filter(p => !p.text && !pathLocked(layer, p) && pathVisible(layer, p)).flatMap(p => {
+      const pieces = knifePath(p, a, b); return pieces ? [[p.id, pieces.map((piece, i) => ({ ...p, ...piece, id: i ? crypto.randomUUID() : p.id }))] as const] : [];
+    }));
+    if (!cut.size) { setNotice('The knife did not cut through a path on this layer. Drag it all the way across a shape.'); return; }
+    changeLayer(l => ({ ...l, paths: l.paths.flatMap(p => cut.get(p.id) ?? [p]) })); setSelected([...cut.values()].flat().map(p => p.id)); setNode(null);
+    setNotice(`Cut into ${[...cut.values()].flat().length} pieces.`);
+  };
   const [selection, setSelection] = useState<PixelSelection | null>(null), [selectMode, setSelectMode] = useState<SelectMode>('new'), [wandTolerance, setWandTolerance] = useState(32);
   const selectionRef = useRef(selection); selectionRef.current = selection;
   /** Undo and redo bring back the selection that was active at each step of the drawing. */
@@ -524,9 +542,20 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
             <FieldRow label="Strength"><Slider min={5} max={95} value={Math.round(brush.smudge * 100)} unit="%" onChange={v => setBrush(b => ({ ...b, smudge: v / 100 }))} ariaLabel="Smudge strength" /></FieldRow></>}
           {(tool.startsWith('marquee') || tool === 'wand') && <FieldRow label="Mode"><SelectField aria-label="Selection mode" value={selectMode} options={SELECT_MODES} onChange={event => setSelectMode(event.target.value as SelectMode)} /></FieldRow>}
           {tool === 'wand' && <FieldRow label="Tolerance"><Slider min={0} max={255} value={wandTolerance} onChange={setWandTolerance} ariaLabel="Magic wand tolerance" /></FieldRow>}
+          {tool === 'shape' && <><div className="sketch-brush-grid" role="group" aria-label="Shape library">
+              {SHAPES.map(kind => <button key={kind.id} type="button" className="sketch-brush-preset" aria-pressed={kind.id === shapeKind.id} title={kind.name} onClick={() => setShapeID(kind.id)}>
+                <svg viewBox="0 0 28 28" aria-hidden="true"><path d={pathData({ ...makeShape(kind.id, { x: 3, y: 3, width: 22, height: 22 }, shapeAmounts[kind.id]), closed: true })} fill="currentColor" fillRule="evenodd" /></svg><span>{kind.name}</span></button>)}
+            </div>
+            {shapeKind.amount && <FieldRow label={shapeKind.amount.label}><Slider min={shapeKind.amount.min} max={shapeKind.amount.max} step={shapeKind.amount.step} unit={shapeKind.amount.unit} value={shapeAmount} onChange={value => setShapeAmounts(a => ({ ...a, [shapeKind.id]: value }))} ariaLabel={shapeKind.amount.label} /></FieldRow>}</>}
+          {tool === 'corner' && <><FieldRow label="Radius"><NumberField aria-label="Corner radius" value={corner.radius} min={.1} max={10000} unit="px" onCommit={radius => setCorner(c => ({ ...c, radius }))} /></FieldRow>
+            <FieldRow label="Corner"><SelectField aria-label="Corner style" value={corner.style} options={[{ value: 'round', label: 'Rounded' }, { value: 'straight', label: 'Straight (chamfer)' }]} onChange={event => setCorner(c => ({ ...c, style: event.target.value as CornerStyle }))} /></FieldRow>
+            <Button disabled={disabled || !chosen.some(p => !p.text)} onClick={() => replace(chosen.map(p => p.text ? p : roundAllCorners(p, corner.radius, corner.style)))}>Apply to every corner</Button></>}
           {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
           {(tool === 'polygon' || tool === 'star') && <FieldRow label="Points"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
-          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'transform' ? 'Drag inside the selection to move its pixels; Alt-drag moves a copy. Drag a handle to scale (Shift keeps the proportions), the round handle to rotate, or a side handle with Ctrl or Cmd to skew. Arrow keys nudge. With nothing selected, everything painted on the layer moves.'
+          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'shape' ? 'Pick a shape, then drag a box to draw it; Shift keeps it square. Set its one option first. The result is an ordinary path you can edit with nodes.'
+            : tool === 'corner' ? 'Select a path, then drag one of its corner dots: the further you drag, the larger the radius; Shift rounds every corner alike. Or type a radius and apply it to every corner. Corners between curved edges are left alone.'
+            : tool === 'knife' ? 'Drag a straight line across paths to cut them. Closed shapes split into closed pieces where the line passes all the way through; open paths split where it crosses. With paths selected, only those are cut.'
+            : tool === 'transform' ? 'Drag inside the selection to move its pixels; Alt-drag moves a copy. Drag a handle to scale (Shift keeps the proportions), the round handle to rotate, or a side handle with Ctrl or Cmd to skew. Arrow keys nudge. With nothing selected, everything painted on the layer moves.'
             : tool === 'wand' ? 'Click to select the connected area of similar colour on this pixel layer. Tolerance is how different a colour may be. Shift adds, Alt subtracts.'
             : tool === 'marquee-polygon' ? 'Click each corner; click the first corner, double-click or press Enter to finish. Painting, erasing and filling then stay inside the selection.'
             : tool.startsWith('marquee') ? 'Drag to select. Hold Shift as you start to add, Alt to subtract, both to intersect. Painting, erasing and filling then stay inside the selection; Delete clears it; Ctrl or Cmd+D deselects.'
@@ -564,7 +593,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
           layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
-        select={pixelSelect} pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
+        makeShape={box => makeShape(shapeKind.id, box, shapeAmount)} cornerStyle={corner.style} onKnife={knife} select={pixelSelect} pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
         openPixels={() => pixelQueue.current.then(() => docRef.current.layers.find(l => l.id === layer.id)?.pixels)} onSmudged={(layerID, stroke) => editPixels(layerID, [], async () => ({ bitmap: await stroke.encode() }))}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>

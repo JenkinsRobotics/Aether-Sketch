@@ -1,4 +1,5 @@
-import { pathBounds, pathData, strokeDash, type Point } from '@aether/sketch';
+import { pathBounds, pathData, type Point } from '@aether/sketch';
+import { arrowHeads, dashArray } from './vector';
 import type { DrawingPath, Layer, PixelBitmap } from './document';
 import type { BrushStyle, Dab } from './brush';
 
@@ -170,7 +171,7 @@ function drawPath(ctx: CanvasRenderingContext2D, p: DrawingPath, erase: boolean)
   if (fills) { s.globalAlpha = erase ? 1 : fillAlpha; s.fillStyle = fill; s.fill(shape, rule); }
   if (strokes) {
     s.globalAlpha = erase ? 1 : p.strokeOpacity ?? 1; s.strokeStyle = p.color; s.lineWidth = p.widthPx; s.lineCap = p.lineCap ?? 'round'; s.lineJoin = p.lineJoin ?? 'round';
-    s.setLineDash(strokeDash(p.dash, p.widthPx) ?? []); s.stroke(shape);
+    s.setLineDash(dashArray(p) ?? []); s.stroke(shape);
   }
   ctx.globalAlpha = erase ? 1 : p.opacity; ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
   ctx.drawImage(scratch, x, y); ctx.restore();
@@ -197,7 +198,8 @@ const tooLarge = (r: Rect) => r.width > PIXEL_MAX_SIDE || r.height > PIXEL_MAX_S
 const LIMIT = `A pixel layer can be up to ${PIXEL_MAX_SIDE} px wide and tall. Add another pixel layer to paint further away.`;
 
 /** Paint or erase these paths on a pixel layer, inside `clip` when there is a selection. Null when nothing would change. */
-export async function paintPixels(current: PixelBitmap | undefined, paths: DrawingPath[], mode: 'paint' | 'erase', clip?: PixelSelection | null): Promise<PixelResult> {
+export async function paintPixels(current: PixelBitmap | undefined, drawn: DrawingPath[], mode: 'paint' | 'erase', clip?: PixelSelection | null): Promise<PixelResult> {
+  const paths = drawn.flatMap(p => [p, ...arrowHeads(p)]);
   const marked = paintedRect(paths); if (!marked || (mode === 'erase' && !current)) return null;
   const rect = mode === 'erase' ? current! : unionRect(current, marked)!;
   if (tooLarge(rect)) return { problem: LIMIT };

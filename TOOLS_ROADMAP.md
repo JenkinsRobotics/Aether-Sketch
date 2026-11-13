@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.23)
+## Where it stands (alpha-0.1.24)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -22,8 +22,8 @@ and eyedropper follow the current layer's kind.
 
 | | Pixel | Vector |
 |---|---|---|
-| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; ruler, ellipse, symmetry (mirror, flip, quad, radial), 1- and 2-point perspective, steady stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, text, select, node editing, lasso select, trim, Booleans, gradients, draw inside, align, distribute, order, flip, rotate, groups, snapping |
-| Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No corner tool, shape library, stroke options (dashes, caps, width profile), text on a path, layer effects, symbols or multiple artboards. |
+| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; ruler, ellipse, symmetry (mirror, flip, quad, radial), 1- and 2-point perspective, steady stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans, gradients, stroke caps, joins, named and custom dashes, arrowheads, draw inside, align, distribute, order, flip, rotate, groups, snapping |
+| Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No pressure width profile on strokes, shape builder, text on a path, layer effects, symbols or multiple artboards. Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
 
 Pixel layer limits in this release:
 
@@ -58,9 +58,12 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
    smudge only inside; move, scale, rotate, skew, flip, nudge and Alt-drag copy.
    Still to do here: feather, cut, copy and paste, four-corner distort, and keeping
    the pixels floating across several transforms so they resample once.
-4. **Vector stroke and shape depth.** Stroke options (dashes, caps, joins,
-   pressure width profile), corner tool, a parametric shape library, knife and
-   shape builder, text on a path. (Affinity Designer.)
+4. **Vector stroke and shape depth.** Partly done in alpha-0.1.24: custom dash and
+   gap, arrowheads (arrow, dot, bar) on open paths, corner tool, a 13-shape library,
+   and a straight knife that splits closed shapes into closed pieces. Caps, joins
+   and named dashes were already there. Still to do here: pressure width profile,
+   shape builder, text on a path, live (re-editable) corners and shapes, a freehand
+   knife. (Affinity Designer.)
 5. **Layer depth.** Masks, clipping layers, layer effects (shadow, glow, blur),
    adjustment layers.
 6. **Guides.** French curve, 3-point and fisheye perspective, predictive stroke,
