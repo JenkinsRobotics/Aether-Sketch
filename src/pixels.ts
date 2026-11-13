@@ -1,5 +1,6 @@
 import { pathBounds, pathData, strokeDash, type Point } from '@aether/sketch';
 import type { DrawingPath, Layer, PixelBitmap } from './document';
+import type { BrushStyle, Dab } from './brush';
 
 /** Pixel layers: one bitmap per layer, one document pixel per bitmap pixel. Bitmaps grow in grid steps as paint lands outside them. */
 export const PIXEL_GRID = 256;
@@ -150,4 +151,115 @@ export async function samplePixel(current: PixelBitmap | undefined, at: Point): 
   const c = await surface(current); surfaces.set(current.src, c);
   const [r, g, b, a] = context(c).getImageData(x, y, 1, 1).data;
   return a ? `#${[r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')}` : null;
+}
+
+// ---- Stamped pixel brushes ----
+let paper: HTMLCanvasElement | null = null;
+/** Paper tooth: a repeating noise tile, the same every time, that textured brushes skip over. */
+function paperTexture(): HTMLCanvasElement {
+  if (paper) return paper;
+  let seed = 0x2f6e2b1; const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  const noise = (size: number, strength: number) => { const c = newCanvas(size, size), image = context(c).createImageData(size, size);
+    for (let i = 3; i < image.data.length; i += 4) image.data[i] = random() * strength; context(c).putImageData(image, 0, 0); return c; };
+  const size = 128; paper = newCanvas(size, size); const ctx = context(paper);
+  ctx.drawImage(noise(size / 2, 255), 0, 0, size, size); // soft two-pixel tooth
+  ctx.drawImage(noise(size, 110), 0, 0);               // fine speckle on top
+  return paper;
+}
+
+/**
+ * One stroke of a stamped brush, painted as it is drawn. The canvas holds the stroke alone at full strength, one document
+ * pixel per canvas pixel from `rect`; it is shown over the drawing while painting and lands on the layer with the brush's
+ * opacity, so overlapping stamps build up to that opacity and no further.
+ */
+export class DabStroke {
+  readonly canvas = newCanvas(1, 1); rect: Rect | null = null;
+  /** Some paint fell outside the largest canvas a pixel layer allows. */
+  clipped = false;
+  private scratch = newCanvas(1, 1); private pattern: CanvasPattern | null = null;
+  private readonly rgb: string; private readonly hardness: number; private readonly reach: number;
+  constructor(color: string, private readonly style: BrushStyle) {
+    this.rgb = hexRGB(color).join(','); this.hardness = Math.min(1, Math.max(0, 1 - style.softness)); this.reach = 1 + style.softness * .6;
+  }
+  private fit(boxes: Rect[]): boolean {
+    const need = boxes.reduce<Rect | null>((r, b) => unionRect(r, b), null); if (!need) return false;
+    const next = unionRect(this.rect, snapOut(need))!, old = this.rect;
+    if (old && next.x === old.x && next.y === old.y && next.width === old.width && next.height === old.height) return true;
+    if (tooLarge(next)) { this.clipped = true; return !!old; }
+    const copy = old && newCanvas(old.width, old.height); if (copy) context(copy).drawImage(this.canvas, 0, 0);
+    this.canvas.width = next.width; this.canvas.height = next.height; this.rect = next;
+    if (copy && old) context(this.canvas).drawImage(copy, old.x - next.x, old.y - next.y);
+    return true;
+  }
+  /** Stamp these dabs, and their copies under each symmetry map, growing the canvas to hold them. */
+  stamp(dabs: Dab[], maps: ((p: Point) => Point)[] = []) {
+    const copies = (d: Dab): Dab[] => [d, ...maps.map(map => { const [x, y] = map([d.x, d.y]); return { ...d, x, y }; })];
+    const box = (d: Dab): Rect => { const r = d.radius * this.reach + 1; return { x: d.x - r, y: d.y - r, width: r * 2, height: r * 2 }; };
+    let all = dabs.flatMap(copies); if (!all.length) return;
+    // Symmetry copies can land further apart than one canvas reaches; the stroke under the pen always paints.
+    if (!this.fit(all.map(box))) { all = dabs; if (!this.fit(all.map(box))) return; }
+    const ctx = context(this.canvas), rect = this.rect!, grain = this.style.grain ?? 0;
+    for (const d of all) {
+      const r = d.radius * this.reach, x = d.x - rect.x, y = d.y - rect.y;
+      if (!grain) { ctx.globalAlpha = d.alpha; this.tip(ctx, x, y, r); continue; }
+      // Textured: stamp on a scratch canvas, knock the paper's tooth out of it, then lay it down.
+      const side = Math.ceil(r * 2) + 2, x0 = Math.floor(d.x - r) - 1, y0 = Math.floor(d.y - r) - 1;
+      if (this.scratch.width < side) { this.scratch.width = this.scratch.height = side; }
+      const s = context(this.scratch); s.setTransform(1, 0, 0, 1, 0, 0); s.globalCompositeOperation = 'source-over'; s.globalAlpha = 1; s.clearRect(0, 0, side, side);
+      this.tip(s, d.x - x0, d.y - y0, r);
+      s.globalCompositeOperation = 'destination-out'; s.globalAlpha = grain; s.fillStyle = this.pattern ??= s.createPattern(paperTexture(), 'repeat')!;
+      s.setTransform(1, 0, 0, 1, -x0, -y0); s.fillRect(x0, y0, side, side);
+      ctx.globalAlpha = d.alpha; ctx.drawImage(this.scratch, 0, 0, side, side, x0 - rect.x, y0 - rect.y, side, side);
+    }
+    ctx.globalAlpha = 1;
+  }
+  /** The brush tip: a hard disc, or one that fades from `hardness` of its radius to the edge. */
+  private tip(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
+    if (this.hardness >= .98) { ctx.fillStyle = `rgb(${this.rgb})`; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); return; }
+    const g = ctx.createRadialGradient(x, y, r * this.hardness * .9, x, y, r), stop = (t: number, a: number) => g.addColorStop(t, `rgba(${this.rgb},${a})`);
+    stop(0, 1); stop(.35, .72); stop(.7, .24); stop(1, 0);
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+}
+
+/** Land a finished stroke canvas on a pixel layer at `opacity`. */
+export async function compositePixels(current: PixelBitmap | undefined, stroke: HTMLCanvasElement, at: Rect, opacity: number): Promise<PixelResult> {
+  const rect = unionRect(current, at)!;
+  if (tooLarge(rect)) return { problem: LIMIT };
+  const c = await openSurface(current, rect), ctx = context(c);
+  ctx.save(); ctx.globalAlpha = opacity; ctx.drawImage(stroke, at.x - rect.x, at.y - rect.y); ctx.restore();
+  return { bitmap: await encode(c, rect) };
+}
+
+/**
+ * Smudge: pushes the paint already on a pixel layer along the stroke. It works on the layer's own canvas, which is shown
+ * in place of the layer while smudging. ponytail: it drags paint into empty areas but not emptiness into paint.
+ */
+export class SmudgeStroke {
+  changed = false;
+  private last: Point | null = null; private pick = newCanvas(1, 1);
+  private constructor(readonly canvas: HTMLCanvasElement, readonly rect: Rect, private readonly src: string) {}
+  static async open(bitmap: PixelBitmap): Promise<SmudgeStroke> {
+    return new SmudgeStroke(await surface(bitmap), { x: bitmap.x, y: bitmap.y, width: bitmap.width, height: bitmap.height }, bitmap.src);
+  }
+  /** Move to `point`: at each short step, lift the paint under the last spot through a soft round mask and lay it on the next. */
+  to(point: Point, radius: number, strength: number) {
+    const from = this.last; this.last = point; if (!from) return;
+    const length = Math.hypot(point[0] - from[0], point[1] - from[1]); if (!length) return;
+    const steps = Math.min(2000, Math.ceil(length / Math.max(1, radius * .25))), side = Math.ceil(radius * 2) + 2, half = side / 2;
+    if (this.pick.width < side) this.pick.width = this.pick.height = side;
+    const ctx = context(this.canvas), p = context(this.pick), { x: ox, y: oy } = this.rect;
+    for (let i = 1; i <= steps; i++) {
+      const a = (i - 1) / steps, b = i / steps, sx = from[0] + (point[0] - from[0]) * a, sy = from[1] + (point[1] - from[1]) * a;
+      p.globalCompositeOperation = 'source-over'; p.clearRect(0, 0, side, side);
+      p.drawImage(this.canvas, sx - ox - half, sy - oy - half, side, side, 0, 0, side, side);
+      const mask = p.createRadialGradient(half, half, radius * .4, half, half, radius); mask.addColorStop(0, 'rgba(0,0,0,1)'); mask.addColorStop(1, 'rgba(0,0,0,0)');
+      p.globalCompositeOperation = 'destination-in'; p.fillStyle = mask; p.fillRect(0, 0, side, side);
+      ctx.globalAlpha = strength; ctx.drawImage(this.pick, 0, 0, side, side, from[0] + (point[0] - from[0]) * b - ox - half, from[1] + (point[1] - from[1]) * b - oy - half, side, side);
+    }
+    ctx.globalAlpha = 1; this.changed = true;
+  }
+  /** Hand an untouched canvas back for the next edit. */
+  release() { if (!this.changed) surfaces.set(this.src, this.canvas); }
+  encode(): Promise<PixelBitmap> { return encode(this.canvas, this.rect); }
 }

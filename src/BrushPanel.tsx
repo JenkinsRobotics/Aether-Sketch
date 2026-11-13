@@ -11,7 +11,7 @@ function Preview({ style, color }: { style: BrushStyle; color: string }) {
 }
 
 /** Brush library (presets by family) and brush properties, the controls SketchBook's Brush Properties give. */
-export function BrushPanel({ style, presetID, color, onChange }: { style: BrushStyle; presetID: string | null; color: string; onChange: (style: BrushStyle, presetID: string | null) => void }) {
+export function BrushPanel({ style, presetID, color, onChange, pixel = false }: { /** Show the stamped-brush controls (the Pixel workspace). */ pixel?: boolean; style: BrushStyle; presetID: string | null; color: string; onChange: (style: BrushStyle, presetID: string | null) => void }) {
   const set = (patch: Partial<BrushStyle>) => onChange({ ...style, ...patch }, null);
   const groups = [...new Set(BRUSH_PRESETS.map(b => b.group))];
   const pick = (b: BrushPreset) => { const { id: _id, name: _name, group: _group, ...preset } = b; onChange(preset, b.id); };
@@ -30,7 +30,11 @@ export function BrushPanel({ style, presetID, color, onChange }: { style: BrushS
       <FieldRow label="Opacity"><Slider ariaLabel="Opacity with heavy pressure" min={1} max={100} unit="%" value={Math.round(style.opacity * 100)} onChange={v => set({ opacity: v / 100, minOpacity: Math.min(style.minOpacity, v / 100) })} /></FieldRow>
       <FieldRow label="Light-pressure opacity"><Slider ariaLabel="Opacity with light pressure" min={0} max={100} unit="%" value={Math.round(style.minOpacity * 100)} onChange={v => set({ minOpacity: Math.min(style.opacity, v / 100) })} /></FieldRow>
       <FieldRow label="Softness"><Slider ariaLabel="Brush softness" min={0} max={100} unit="%" value={Math.round(style.softness * 100)} onChange={v => set({ softness: v / 100 })} /></FieldRow>
-      <FieldRow label="Ends"><Checkbox label="Taper" checked={style.taper} onChange={event => set({ taper: event.target.checked })} /></FieldRow>
+      {pixel ? <>
+        <FieldRow label="Flow"><Slider ariaLabel="Paint laid down by each stamp" min={1} max={100} unit="%" value={Math.round((style.flow ?? 1) * 100)} onChange={v => set({ flow: v / 100 })} /></FieldRow>
+        <FieldRow label="Spacing"><Slider ariaLabel="Gap between stamps, as a share of the tip width" min={2} max={100} unit="%" value={Math.round((style.spacing ?? .1) * 100)} onChange={v => set({ spacing: v / 100 })} /></FieldRow>
+        <FieldRow label="Grain"><Slider ariaLabel="Paper grain" min={0} max={100} unit="%" value={Math.round((style.grain ?? 0) * 100)} onChange={v => set({ grain: v / 100 })} /></FieldRow>
+      </> : <FieldRow label="Ends"><Checkbox label="Taper" checked={style.taper} onChange={event => set({ taper: event.target.checked })} /></FieldRow>}
     </div>
   </div>;
 }

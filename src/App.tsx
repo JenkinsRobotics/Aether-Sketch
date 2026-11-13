@@ -40,7 +40,7 @@ import { ancestors } from './structure';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
 import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
-import { fillPixels, paintPixels, pixelBounds, samplePixel, unionRect, type PixelResult } from './pixels';
+import { compositePixels, fillPixels, paintPixels, pixelBounds, samplePixel, unionRect, type PixelResult, type Rect } from './pixels';
 import { useDocument } from './useDocument';
 import './sketch.css';
 /** Every drawing tool, with a name and a recognisable icon. Keys: V select, H hand, Z zoom, B brush, Shift+B pencil,
@@ -49,6 +49,8 @@ import './sketch.css';
 const TOOL_INFO: Record<EditorTool, { label: string; icon: ReactNode }> = {
   select: { label: 'Select and transform (V)', icon: <ToolIcon name="select" /> }, hand: { label: 'Hand: pan (H, or hold Space)', icon: <AetherIcon name="hand" /> },
   zoom: { label: 'Zoom: click in, Alt-click out (Z)', icon: <AetherIcon name="zoom-in" /> },
+  // ponytail: smudge borrows the shared variable-scribble icon until core/assets gains a smudge icon.
+  smudge: { label: 'Smudge', icon: <AetherIcon name="scribble-variable" /> },
   brush: { label: 'Brush (B)', icon: <AetherIcon name="brush" /> }, paint: { label: 'Pencil (Shift+B)', icon: <AetherIcon name="pencil" /> }, eraser: { label: 'Eraser (Shift+E)', icon: <ToolIcon name="remove" /> },
   fill: { label: 'Fill a shape', icon: <ToolIcon name="fill" /> }, freehand: { label: 'Lasso fill (N)', icon: <AetherIcon name="scribble" /> }, eyedropper: { label: 'Eyedropper: pick a colour and style', icon: <ToolIcon name="eye" /> },
   line: { label: 'Line (L)', icon: <ToolIcon name="line" /> }, pen: { label: 'Pen: Bézier curves (P)', icon: <ToolIcon name="pen" /> },
@@ -59,7 +61,7 @@ const TOOL_INFO: Record<EditorTool, { label: string; icon: ReactNode }> = {
 };
 /** The tool bar's tabs: drawing first, then shapes, then editing. Guides live in the center tray, board items in the environment tray. */
 const TOOL_TABS: { id: string; label: string; groups: { id: string; label: string; tools: EditorTool[] }[] }[] = [
-  { id: 'draw', label: 'Draw', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'hand', 'zoom'] }, { id: 'brushes', label: 'Brushes', tools: ['brush', 'paint', 'eraser'] },
+  { id: 'draw', label: 'Draw', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'hand', 'zoom'] }, { id: 'brushes', label: 'Brushes', tools: ['brush', 'paint', 'eraser', 'smudge'] },
     { id: 'colour', label: 'Fill and colour', tools: ['fill', 'freehand', 'eyedropper'] }] },
   { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
   { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
@@ -133,7 +135,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [contour, setContour] = useState(0), [recoveryStatus, setRecoveryStatus] = useState(initial ? 'Recovered local draft' : '');
   const draftID = useRef(crypto.randomUUID()), flushRecovery = useRef<() => void>(()=>{});
   const svgFile = useRef<HTMLInputElement>(null);
-  const [sides, setSides] = useState(6), [brush, setBrush] = useState<BrushSettings>(() => { const { id: _i, name: _n, group: _g, ...style } = BRUSH_PRESETS.find(b => b.id === 'ink-pen')!; return { style, eraserPx: 32 }; });
+  const [sides, setSides] = useState(6), [brush, setBrush] = useState<BrushSettings>(() => { const { id: _i, name: _n, group: _g, ...style } = BRUSH_PRESETS.find(b => b.id === 'ink-pen')!; return { style, eraserPx: 32, smudgePx: 40, smudge: .6 }; });
   const [brushPreset, setBrushPreset] = useState<string | null>('ink-pen'), [guides, setGuides] = useState<Guides>({}), [recentColours, setRecentColours] = useState<string[]>([]);
   const [layerID, setLayerID] = useState(doc.layers[0].id), [selected, setSelected] = useState<string[]>([]), [node, setNode] = useState<NodeSelection | null>(null);
   const [notice, setNotice] = useState(''), [name, setName] = useState(initial?.name ?? 'Untitled'), [epoch, setEpoch] = useState(0);
@@ -202,27 +204,37 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       } catch (error) { setNotice(error instanceof Error ? error.message : 'The pixel layer could not be changed.'); }
       done();
     });
+    return pixelQueue.current;
   };
   const addVector = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
   /** The Pixel workspace paints pixels and the Vector workspace draws paths, whatever layer is current: when the
    * current layer is the other kind, a layer of the right kind is added above it (Affinity's assistant). Text is always a vector object. */
-  const add = (paths: DrawingPath[]) => {
-    const pixels = workspace === 'pixel' && !paths.some(p => p.text);
-    if (pixels === (layer.kind === 'pixel')) { if (pixels) editPixels(layer.id, paths, current => paintPixels(current, paths, 'paint')); else addVector(paths); return; }
-    // An empty layer of the other kind simply becomes the kind being drawn, so a new drawing does not start with a spare layer.
-    if (layer.kind === 'pixel' ? !layer.pixels : !layer.paths.length && !layer.groups?.length) {
-      commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return pixels ? { ...rest, kind: 'pixel' as const } : { ...rest, paths }; }) }));
-      if (pixels) editPixels(layer.id, paths, current => paintPixels(current, paths, 'paint'));
-      return;
-    }
-    const created: Layer = pixels ? newPixelLayer(`Layer ${doc.layers.length + 1}`) : { ...newLayer(`Layer ${doc.layers.length + 1}`), paths };
+  /** The pixel layer that paint lands on: the current one; an empty vector layer turned into one, so a new drawing
+   * does not start with a spare layer; or a new pixel layer above the current one. */
+  const pixelTarget = (): string => {
+    if (layer.kind === 'pixel') return layer.id;
+    if (!layer.paths.length && !layer.groups?.length) { commit(d => ({ ...d, layers: d.layers.map(l => l.id === layer.id ? { ...l, kind: 'pixel' as const } : l) })); return layer.id; }
+    const created = newPixelLayer(`Layer ${doc.layers.length + 1}`);
     commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), created, ...d.layers.slice(at)] }; });
-    setLayerID(created.id); setInsideID(null); setNotice(pixels ? 'Painting on a new pixel layer.' : 'Drawing on a new vector layer.');
-    if (pixels) editPixels(created.id, paths, current => paintPixels(current, paths, 'paint'));
+    setLayerID(created.id); setInsideID(null); setNotice('Painting on a new pixel layer.'); return created.id;
+  };
+  const add = (paths: DrawingPath[]) => {
+    if (workspace === 'pixel' && !paths.some(p => p.text)) { editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint')); return; }
+    if (layer.kind !== 'pixel') { addVector(paths); return; }
+    // Vector drawing on a pixel layer: an unpainted one becomes a vector layer, otherwise a vector layer is added above it.
+    if (!layer.pixels) { commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return { ...rest, paths }; }) })); return; }
+    const created: Layer = { ...newLayer(`Layer ${doc.layers.length + 1}`), paths };
+    commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), created, ...d.layers.slice(at)] }; });
+    setLayerID(created.id); setInsideID(null); setNotice('Drawing on a new vector layer.');
+  };
+  /** A stamped brush stroke, painted live on its own canvas, lands on the pixel layer at the brush's opacity. */
+  const paintStroke = (stroke: HTMLCanvasElement, rect: Rect, opacity: number, clipped: boolean) => {
+    if (clipped) setNotice('Part of that stroke fell outside the largest area one pixel layer can hold (4096 px a side).');
+    return editPixels(pixelTarget(), [], current => compositePixels(current, stroke, rect, opacity));
   };
   const erasePixels = (outline: [number, number][]) => editPixels(layer.id, [], current => paintPixels(current, [{ id: 'eraser', points: outline, closed: true, fill: '#000000', color: '#000000', widthPx: 1, opacity: 1, strokeEnabled: false }], 'erase'));
   const setStyle = (patch: Partial<DrawingPath>) => { if (!disabled) replace(chosen.map(p => ({ ...p, ...patch }))); };
-  const chooseTool = (next: AppTool) => { setTool(next); setNode(null); };
+  const chooseTool = (next: AppTool) => { setTool(next); setNode(null); if (next === 'smudge' && !layer.pixels) setNotice('Smudge works on a painted pixel layer. Select one in Layers.'); };
   /** Where a new guide appears: the middle of the view. */
   const viewCentre = (): [number, number] => { const box = document.querySelector('[aria-label="Sketch board"]')?.getBoundingClientRect(); return [((box?.width ?? 800) / 2 - camera.x) / camera.zoom, ((box?.height ?? 600) / 2 - camera.y) / camera.zoom]; };
   const toggleGuide = (id: string) => {
@@ -430,10 +442,12 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
           onDelete={() => { changeBoard(board.filter(i => !boardSelection.includes(i.id) && !(i.kind === 'connector' && (boardSelection.includes(i.from ?? '') || boardSelection.includes(i.to ?? ''))))); setBoardSelection([]); }} />}
         <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<GuidePanel guides={guides} onChange={setGuides} /><strong>{isBoardTool(tool) ? boardTools.find(t => t.id === tool)?.label : TOOL_INFO[tool].label.replace(/ \(.*\)$/, '')}</strong>
-          {tool === 'brush' && <BrushPanel style={brush.style} presetID={brushPreset} color={paint.color} onChange={(style, id) => { setBrush(b => ({ ...b, style })); setBrushPreset(id); }} />}
+          {tool === 'brush' && <BrushPanel pixel={workspace === 'pixel'} style={brush.style} presetID={brushPreset} color={paint.color} onChange={(style, id) => { setBrush(b => ({ ...b, style })); setBrushPreset(id); }} />}
+          {tool === 'smudge' && <><FieldRow label="Size"><Slider min={4} max={300} value={brush.smudgePx} unit="px" onChange={smudgePx => setBrush(b => ({ ...b, smudgePx }))} ariaLabel="Smudge size" /></FieldRow>
+            <FieldRow label="Strength"><Slider min={5} max={95} value={Math.round(brush.smudge * 100)} unit="%" onChange={v => setBrush(b => ({ ...b, smudge: v / 100 }))} ariaLabel="Smudge strength" /></FieldRow></>}
           {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
           {(tool === 'polygon' || tool === 'star') && <FieldRow label="Points"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
-          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
+          <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'smudge' ? 'Drag to push paint around on a pixel layer. Size is on screen; strength is how far the paint carries.' : tool === 'brush' && workspace === 'pixel' ? 'Paints pixels as you draw. Pressure from a pen, or speed from a mouse, sets the width. Flow is how much paint each stamp lays down; opacity caps the whole stroke; grain lets paper texture show through.' : tool === 'brush' ? 'Pressure from a pen, or speed from a mouse, sets the width. Size is on screen, so zoom in to draw finer detail. Each stroke is a filled shape.' : tool === 'eraser' ? 'Cuts through closed shapes and brush strokes on this layer. Size is on screen. Open pencil lines are not erased; use Trim.' : tool === 'pen' ? 'Click corners; drag handles. Enter finishes an open path; click the first point or Shift+Enter closes it.' : tool === 'trim' ? 'Click a section between crossings to trim it. Without crossings, the clicked edge is removed.' : tool === 'node' ? 'Drag nodes or handles. Double-click an edge to add a point. Alt breaks linked handles.' : 'Shift adds to selection or constrains a drag. Drag empty space to select several paths.'}</p></details></div>
         <div className="sketch-layer-settings"><strong>Layer · {layer.name}</strong>
           <FieldRow label="Opacity"><Slider min={0} max={100} unit="%" value={Math.round((layer.opacity ?? 1) * 100)} disabled={layer.locked} ariaLabel="Layer opacity"
             onChange={value => changeLayer(l => ({ ...l, opacity: value / 100 }))} /></FieldRow>
@@ -467,7 +481,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
           layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
-        pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'}
+        pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
+        openPixels={() => pixelQueue.current.then(() => docRef.current.layers.find(l => l.id === layer.id)?.pixels)} onSmudged={(layerID, stroke) => editPixels(layerID, [], async () => ({ bitmap: await stroke.encode() }))}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>
     </StandardAppShell>

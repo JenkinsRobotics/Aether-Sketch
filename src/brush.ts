@@ -6,20 +6,27 @@ export interface BrushSample { point: Point; pressure: number; timeMs: number }
 export interface BrushOptions { sizePx: number; taper: boolean; pen: boolean; minSize?: number }
 
 /** A brush's character, the controls SketchBook's Brush Properties expose. Sizes are on screen; opacities 0–1; softness 0–1 blurs the stroke. */
-export interface BrushStyle { sizePx: number; minSize: number; opacity: number; minOpacity: number; softness: number; taper: boolean }
-export interface BrushPreset extends BrushStyle { id: string; name: string; group: 'Sketch' | 'Ink' | 'Paint' | 'Airbrush' }
+export interface BrushStyle { sizePx: number; minSize: number; opacity: number; minOpacity: number; softness: number; taper: boolean;
+  /** Pixel brushes stamp the tip along the stroke. `spacing` is the gap between stamps as a fraction of the tip's width (default 0.1),
+   * `flow` how much paint each stamp lays down (default 1; `opacity` caps the whole stroke), `grain` how strongly paper texture
+   * breaks the paint up (default 0) and `scatter` how far stamps stray, in tip radii (default 0). */
+  spacing?: number; flow?: number; grain?: number; scatter?: number }
+export interface BrushPreset extends BrushStyle { id: string; name: string; group: 'Sketch' | 'Ink' | 'Paint' | 'Dry media' | 'Airbrush' }
 export const BRUSH_PRESETS: readonly BrushPreset[] = [
-  { id: 'pencil-hb', name: 'Pencil HB', group: 'Sketch', sizePx: 3, minSize: .45, opacity: .8, minOpacity: .25, softness: .08, taper: true },
-  { id: 'pencil-soft', name: 'Soft pencil 4B', group: 'Sketch', sizePx: 6, minSize: .4, opacity: .7, minOpacity: .15, softness: .2, taper: true },
-  { id: 'ballpoint', name: 'Ballpoint', group: 'Sketch', sizePx: 2, minSize: .7, opacity: 1, minOpacity: .6, softness: 0, taper: false },
-  { id: 'ink-pen', name: 'Ink pen', group: 'Ink', sizePx: 5, minSize: .15, opacity: 1, minOpacity: 1, softness: 0, taper: true },
-  { id: 'fine-liner', name: 'Fine liner', group: 'Ink', sizePx: 2.5, minSize: .95, opacity: 1, minOpacity: 1, softness: 0, taper: false },
-  { id: 'brush-pen', name: 'Brush pen', group: 'Ink', sizePx: 14, minSize: .1, opacity: 1, minOpacity: 1, softness: 0, taper: true },
-  { id: 'marker', name: 'Marker', group: 'Paint', sizePx: 22, minSize: .9, opacity: .45, minOpacity: .45, softness: .04, taper: false },
-  { id: 'felt-tip', name: 'Felt tip', group: 'Paint', sizePx: 10, minSize: .75, opacity: .85, minOpacity: .6, softness: .06, taper: false },
-  { id: 'paint-brush', name: 'Paint brush', group: 'Paint', sizePx: 28, minSize: .35, opacity: .9, minOpacity: .5, softness: .1, taper: true },
-  { id: 'airbrush-soft', name: 'Soft airbrush', group: 'Airbrush', sizePx: 90, minSize: .5, opacity: .3, minOpacity: .05, softness: 1, taper: false },
-  { id: 'airbrush-hard', name: 'Hard airbrush', group: 'Airbrush', sizePx: 40, minSize: .6, opacity: .55, minOpacity: .1, softness: .4, taper: false },
+  { id: 'pencil-hb', name: 'Pencil HB', group: 'Sketch', sizePx: 3, minSize: .45, opacity: .8, minOpacity: .25, softness: .08, taper: true, grain: .5, flow: .6 },
+  { id: 'pencil-soft', name: 'Soft pencil 4B', group: 'Sketch', sizePx: 6, minSize: .4, opacity: .7, minOpacity: .15, softness: .2, taper: true, grain: .6, flow: .5 },
+  { id: 'ballpoint', name: 'Ballpoint', group: 'Sketch', sizePx: 2, minSize: .7, opacity: 1, minOpacity: .6, softness: 0, taper: false, spacing: .06 },
+  { id: 'ink-pen', name: 'Ink pen', group: 'Ink', sizePx: 5, minSize: .15, opacity: 1, minOpacity: 1, softness: 0, taper: true, spacing: .05 },
+  { id: 'fine-liner', name: 'Fine liner', group: 'Ink', sizePx: 2.5, minSize: .95, opacity: 1, minOpacity: 1, softness: 0, taper: false, spacing: .05 },
+  { id: 'brush-pen', name: 'Brush pen', group: 'Ink', sizePx: 14, minSize: .1, opacity: 1, minOpacity: 1, softness: 0, taper: true, spacing: .05 },
+  { id: 'marker', name: 'Marker', group: 'Paint', sizePx: 22, minSize: .9, opacity: .45, minOpacity: .45, softness: .04, taper: false, spacing: .06 },
+  { id: 'felt-tip', name: 'Felt tip', group: 'Paint', sizePx: 10, minSize: .75, opacity: .85, minOpacity: .6, softness: .06, taper: false, flow: .8 },
+  { id: 'paint-brush', name: 'Paint brush', group: 'Paint', sizePx: 28, minSize: .35, opacity: .9, minOpacity: .5, softness: .1, taper: true, flow: .5, grain: .15 },
+  { id: 'charcoal', name: 'Charcoal', group: 'Dry media', sizePx: 26, minSize: .5, opacity: .9, minOpacity: .25, softness: .25, taper: false, grain: .85, flow: .45, scatter: .08 },
+  { id: 'chalk', name: 'Chalk', group: 'Dry media', sizePx: 30, minSize: .7, opacity: .9, minOpacity: .4, softness: .1, taper: false, grain: .7, flow: .6 },
+  { id: 'crayon', name: 'Crayon', group: 'Dry media', sizePx: 14, minSize: .6, opacity: .95, minOpacity: .5, softness: .05, taper: false, grain: .55, flow: .7 },
+  { id: 'airbrush-soft', name: 'Soft airbrush', group: 'Airbrush', sizePx: 90, minSize: .5, opacity: .3, minOpacity: .05, softness: 1, taper: false, flow: .08 },
+  { id: 'airbrush-hard', name: 'Hard airbrush', group: 'Airbrush', sizePx: 40, minSize: .6, opacity: .55, minOpacity: .1, softness: .4, taper: false, flow: .15 },
 ];
 /** Stroke opacity from the average pressure (a mouse counts as a medium press). */
 export const brushOpacity = (style: Pick<BrushStyle, 'opacity' | 'minOpacity'>, samples: BrushSample[]) => {
@@ -44,6 +51,40 @@ export function brushWidths(samples: BrushSample[], { sizePx, taper, pen, minSiz
   const along = samples.reduce<number[]>((acc, s, i) => [...acc, i ? acc[i - 1] + dist(s.point, samples[i - 1].point) : 0], []);
   const total = along.at(-1) ?? 0, length = Math.min(sizePx * 3, total / 3);
   return smooth.map((w, i) => length > 0 ? w * Math.max(.08, Math.sqrt(Math.min(1, along[i] / length, (total - along[i]) / length))) : w);
+}
+
+/** One stamp of a pixel brush: where, how big and how much paint (0–1). */
+export interface Dab { x: number; y: number; radius: number; alpha: number }
+/** What a stroke carries from one sample to the next: the last sample, its size and paint, the mouse's smoothed speed and the distance left to the next stamp. */
+export interface DabState { last?: BrushSample; width: number; paint: number; speed: number; toNext: number }
+export const newDabState = (): DabState => ({ width: 0, paint: 0, speed: 0, toNext: 0 });
+/**
+ * The stamps a pixel brush lays from the previous sample to `to`. A pen sets size and paint by pressure; a mouse thins as it
+ * speeds up, as vector strokes do. `sizePx` is the tip width in document pixels. The first sample stamps once, so a tap makes a dot.
+ */
+export function dabsTo(state: DabState, to: BrushSample, style: BrushStyle, sizePx: number, pen: boolean, random: () => number = Math.random): Dab[] {
+  const from = state.last, low = style.minSize;
+  if (from && !pen) { const ms = Math.max(1, to.timeMs - from.timeMs); state.speed = state.speed * .7 + (dist(to.point, from.point) / ms) * .3; }
+  const width = pen ? low + (1 - low) * to.pressure : low + (1 - low) * Math.exp(-state.speed / Math.max(.05, sizePx * .08));
+  const top = Math.max(style.opacity, 1e-6), paint = Math.min(1, Math.max(0, (style.minOpacity + (style.opacity - style.minOpacity) * to.pressure) / top)) * (style.flow ?? 1);
+  const stamp = (x: number, y: number, w: number, a: number): Dab => {
+    const radius = Math.max(.25, w * sizePx / 2), stray = (style.scatter ?? 0) * radius;
+    return { x: x + (stray ? (random() * 2 - 1) * stray : 0), y: y + (stray ? (random() * 2 - 1) * stray : 0), radius, alpha: a };
+  };
+  const dabs: Dab[] = [];
+  if (!from) { dabs.push(stamp(to.point[0], to.point[1], width, paint)); state.toNext = Math.max(.25, (style.spacing ?? .1) * width * sizePx); }
+  else {
+    const length = dist(from.point, to.point); let at = state.toNext;
+    // ponytail: at most 4000 stamps a segment, so one wild jump of the pointer cannot stall the page.
+    while (at <= length && dabs.length < 4000) {
+      const t = length ? at / length : 1, w = state.width + (width - state.width) * t;
+      dabs.push(stamp(from.point[0] + (to.point[0] - from.point[0]) * t, from.point[1] + (to.point[1] - from.point[1]) * t, w, state.paint + (paint - state.paint) * t));
+      at += Math.max(.25, (style.spacing ?? .1) * w * sizePx);
+    }
+    state.toNext = at - length;
+  }
+  state.last = to; state.width = width; state.paint = paint;
+  return dabs;
 }
 
 /** A brush stroke as one closed outline, so it fills, erases and edits like any other shape. */

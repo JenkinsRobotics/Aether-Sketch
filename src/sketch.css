@@ -54,6 +54,9 @@ html, body, #root { height: 100%; margin: 0; }
 @media (max-width: 900px) { .sketch-recovery-status { display: none; } }
 /* Brush and eraser strokes while drawing: the brush shows its real fill, the eraser a translucent swath. */
 .sketch-brush-preview { stroke: none; }
+/* Stamped strokes in progress: canvases in document pixels, over the drawing, until the layer takes them. */
+.sketch-pixel-overlay { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; }
+.sketch-pixel-overlay canvas { position: absolute; pointer-events: none; max-width: none; }
 .sketch-eraser-preview { fill: var(--aether-color-accent); fill-opacity: .25; stroke: var(--aether-color-accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .sketch-layer-settings { display: grid; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--aether-color-border); }
 /* Drawing guides: thin accent lines, round handles that drag. Lines ignore the pointer so strokes pass through them. */

@@ -47,12 +47,15 @@ export function strokeConstraint(guides: Guides, start: Point, toward: Point, re
 /** Steady stroke: each sample moves part-way from the last one towards the pointer. */
 export const steadyPoint = (previous: Point, at: Point, steady: number): Point => [previous[0] + (at[0] - previous[0]) * (1 - steady), previous[1] + (at[1] - previous[1]) * (1 - steady)];
 
-/** The extra copies symmetry draws for a new path (the original is not included). */
-export function symmetryCopies<P extends SketchPath>(path: P, s: Symmetry): P[] {
+/** How symmetry repeats a point: one map per extra copy (the original is not included). */
+export function symmetryMaps(s: Symmetry): ((v: Point) => Point)[] {
   const [cx, cy] = s.center;
   const mirrorX = (v: Point): Point => [2 * cx - v[0], v[1]], mirrorY = (v: Point): Point => [v[0], 2 * cy - v[1]];
   const rotate = (angle: number) => (v: Point): Point => { const c = Math.cos(angle), n = Math.sin(angle), x = v[0] - cx, y = v[1] - cy; return [cx + x * c - y * n, cy + x * n + y * c]; };
-  const maps = s.mode === 'vertical' ? [mirrorX] : s.mode === 'horizontal' ? [mirrorY] : s.mode === 'both' ? [mirrorX, mirrorY, (v: Point) => mirrorX(mirrorY(v))]
+  return s.mode === 'vertical' ? [mirrorX] : s.mode === 'horizontal' ? [mirrorY] : s.mode === 'both' ? [mirrorX, mirrorY, (v: Point) => mirrorX(mirrorY(v))]
     : Array.from({ length: Math.max(1, Math.round(s.sections)) - 1 }, (_, i) => rotate((i + 1) * Math.PI * 2 / Math.max(1, Math.round(s.sections))));
-  return maps.map(map => ({ ...path, ...transformPath(path, map) }));
+}
+/** The extra copies symmetry draws for a new path (the original is not included). */
+export function symmetryCopies<P extends SketchPath>(path: P, s: Symmetry): P[] {
+  return symmetryMaps(s).map(map => ({ ...path, ...transformPath(path, map) }));
 }
