@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { pathBounds, polygonArea, samplePath, type Point, type SketchPath } from '@aether/sketch';
 import { newDocument, readDocument, serializeDocument, type DrawingPath } from './document';
-import { SHAPES, arrowHeads, cornerIndices, dashArray, knifePath, makeShape, roundAllCorners, roundCorners } from './vector';
+import { SHAPES, arrowHeads, cornerIndices, dashArray, dividePaths, drawnParts, knifePath, makeShape, profileOutline, roundAllCorners, roundCorners } from './vector';
+import { pathGlyphs, textOnPath, textSVG, updateText } from './text';
+import { drawingSVG } from './paint';
+import { drawingPDF } from './export';
 
 const square: SketchPath = { points: [[0, 0], [100, 0], [100, 100], [0, 100]], closed: true };
 const area = (p: SketchPath) => Math.abs(polygonArea(samplePath(p, .05)));
@@ -131,5 +134,79 @@ describe('shape library', () => {
     expect(makeShape('cog', box, 12).points).toHaveLength(48);
     expect(makeShape('donut', box, 50).subpaths).toHaveLength(1);
     expect(area(makeShape('pie', { x: 0, y: 0, width: 100, height: 100 }, 90))).toBeCloseTo(Math.PI * 2500 / 4, -1);
+  });
+});
+
+describe('width profiles', () => {
+  const straight: SketchPath = { points: [[0, 0], [100, 0]], closed: false };
+  it('tapers a straight two-node line to a point at its end', () => {
+    const outline = profileOutline(straight, 10, 'taper-end'), ys = outline.map(p => Math.abs(p[1]));
+    expect(Math.max(...ys)).toBeCloseTo(5);                                            // full width at the start
+    expect(outline.filter(p => Math.abs(p[0] - 100) < 1e-9).every(p => Math.abs(p[1]) < 1e-9)).toBe(true); // a point at the end
+    expect(Math.abs(polygonArea(outline))).toBeCloseTo(100 * 10 / 2, 6);              // a long thin triangle
+  });
+  it('swells in the middle when both ends taper', () => {
+    const outline = profileOutline(straight, 10, 'taper-both'), widest = outline.reduce((a, b) => Math.abs(b[1]) > Math.abs(a[1]) ? b : a);
+    expect(Math.abs(widest[1])).toBeCloseTo(5, 1); expect(Math.abs(widest[0] - 50)).toBeLessThan(5); // full width, in the middle
+    expect(outline.filter(p => p[0] < 1e-9 || p[0] > 100 - 1e-9).every(p => Math.abs(p[1]) < 1e-9)).toBe(true);
+    expect(Math.abs(polygonArea(outline))).toBeCloseTo(100 * 10 * 2 / Math.PI, -1); // sampled in 25 steps
+  });
+  it('replaces the plain stroke with the outline, and leaves other paths as they are', () => {
+    const parts = drawnParts(line({ widthProfile: 'taper-end', arrowEnd: 'arrow' }));
+    expect(parts.map(p => p.id)).toEqual(['l', 'l-stroke', 'l-arrow-end']);
+    expect(parts[0].strokeEnabled).toBe(false); expect(parts[1]).toMatchObject({ closed: true, fill: '#112233', strokeEnabled: false });
+    expect(drawnParts(line())).toEqual([line()]);
+    expect(drawnParts(line({ widthProfile: 'pinch', strokeEnabled: false }))).toHaveLength(1);
+    expect(drawnParts({ ...line({ widthProfile: 'pinch' }), points: [[0, 0], [100, 0], [50, 80]], closed: true })).toHaveLength(1); // closed shapes keep their even outline
+  });
+});
+
+describe('divide', () => {
+  const box = (x: number, y: number, size = 100): SketchPath => ({ points: [[x, y], [x + size, y], [x + size, y + size], [x, y + size]], closed: true });
+  it('splits two overlapping squares into three regions, the overlap painted like the front one', () => {
+    const pieces = dividePaths([box(0, 0), box(50, 50)], .25);
+    expect(pieces.map(p => [Math.round(area(p.path)), p.top]).sort((a, b) => a[0] - b[0] || a[1] - b[1])).toEqual([[2500, 1], [7500, 0], [7500, 1]]);
+    expect(pieces.reduce((n, p) => n + area(p.path), 0)).toBeCloseTo(17500, 3);
+  });
+  it('gives islands their own shapes: a bar across a square leaves two separate ends', () => {
+    const pieces = dividePaths([{ points: [[-50, 40], [150, 40], [150, 60], [-50, 60]], closed: true }, box(0, 0)], .25);
+    expect(pieces.map(p => [Math.round(area(p.path)), p.top]).sort((a, b) => a[0] - b[0] || a[1] - b[1])).toEqual([[1000, 0], [1000, 0], [2000, 1], [4000, 1], [4000, 1]]);
+  });
+  it('keeps a hole as a hole', () => {
+    const pieces = dividePaths([box(0, 0), box(25, 25, 50)], .25), ring = pieces.find(p => p.top === 0)!.path;
+    expect(pieces).toHaveLength(2);
+    expect(ring.subpaths).toHaveLength(1); expect(ring.fillRule).toBe('evenodd');
+  });
+  it('leaves shapes that do not touch as they were', () => {
+    expect(dividePaths([box(0, 0), box(300, 0)], .25).map(p => Math.round(area(p.path)))).toEqual([10000, 10000]);
+  });
+});
+
+describe('text on a path', () => {
+  const guide: SketchPath = { points: [[0, 0], [400, 0]], closed: false };
+  it('follows a copy of the path, as an object that fills', () => {
+    const text = textOnPath(guide);
+    expect(text).toMatchObject({ points: guide.points, closed: false, fillOpen: true, strokeEnabled: false, text: { onPath: true } });
+    expect(updateText(text, { content: 'Datum A' }).points).toBe(text.points); // editing the words never moves the path
+  });
+  it('exports as SVG text on a path, and round-trips through the file', () => {
+    const text = updateText(textOnPath(guide), { content: 'Hello <path>', align: 'middle' }), doc = newDocument(); doc.layers[0].paths.push(text);
+    const svg = textSVG(text, 'fill="#000000"');
+    expect(svg).toContain('<textPath href="#sketch-text-path-'); expect(svg).toContain('startOffset="50%"'); expect(svg).toContain('Hello &lt;path&gt;'); expect(svg).toContain('d="M0,0');
+    expect(drawingSVG(doc)).toContain('<textPath');
+    expect(readDocument(serializeDocument(doc)).layers[0].paths[0].text).toMatchObject({ onPath: true, content: 'Hello <path>' });
+  });
+  it('places each character along the path for PDF, turning with it', () => {
+    const corner = updateText(textOnPath({ points: [[0, 0], [16, 0], [16, 100]], closed: false }), { content: 'ab', fontSizePx: 32 }), glyphs = pathGlyphs(corner);
+    expect(glyphs.map(g => g.char)).toEqual(['a', 'b']);
+    expect(glyphs[0]).toMatchObject({ x: 0, y: 0, angle: 0 });
+    expect(glyphs[1].x).toBeCloseTo(16); expect(glyphs[1].y).toBeCloseTo(0); expect(glyphs[1].angle).toBeCloseTo(Math.PI / 2); // the second letter starts at the corner and heads down
+    const doc = newDocument(); doc.layers[0].paths.push(corner);
+    expect(new TextDecoder().decode(drawingPDF(doc))).toContain('(a) Tj');
+  });
+  it('leaves off what does not fit, and still requires four corners for boxed text', () => {
+    expect(pathGlyphs(updateText(textOnPath({ points: [[0, 0], [40, 0]], closed: false }), { content: 'abcdef', fontSizePx: 32 }))).toHaveLength(2);
+    const doc = newDocument(), boxed = textOnPath({ points: [[0, 0], [16, 0], [16, 100]], closed: false }); delete boxed.text!.onPath; doc.layers[0].paths.push(boxed);
+    expect(() => readDocument(serializeDocument(doc))).toThrow();
   });
 });

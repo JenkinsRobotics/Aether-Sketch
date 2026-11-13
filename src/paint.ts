@@ -1,10 +1,10 @@
 import { textSVG } from './text';
 import { gradientVector, pathBounds, pathData, transformPath } from '@aether/sketch';
-import { arrowHeads, dashArray } from './vector';
+import { dashArray, drawnParts } from './vector';
 import { ancestors, pathLocked, pathVisible } from './structure';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pixelBounds, unionRect } from './pixels';
-export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash', 'dashPx', 'arrowStart', 'arrowEnd'] as const;
+export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash', 'dashPx', 'arrowStart', 'arrowEnd', 'widthProfile'] as const;
 export type PaintStyle = Pick<DrawingPath, typeof paintKeys[number]>;
 export const defaultPaint: PaintStyle = { color: '#2368ce', fill: '#bcd4f5', widthPx: 3, opacity: 1, fillOpacity: 1, strokeOpacity: 1, strokeEnabled: true, lineCap: 'round', lineJoin: 'round', dash: 'solid' };
 export const copyPaint = (p: PaintStyle): PaintStyle => Object.fromEntries(paintKeys.map(key => [key, p[key]])) as PaintStyle;
@@ -92,8 +92,8 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string 
     const shown = { ...l, visible: true };
     const markup = l.paths.filter(p => pathVisible(shown, p)).map(p => {
       const attributes = (path: DrawingPath) => Object.entries(paintAttributes(path, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
-      const attrs = attributes(p), heads = arrowHeads(p).map(head => `<path d="${pathData(head)}" ${attributes(head)}/>`).join('');
-      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>${heads}`));
+      const parts = drawnParts(p).map(part => `<path d="${pathData(part)}" ${attributes(part)}/>`).join('');
+      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attributes(p)) : parts));
     }).join('');
     const b = l.pixels, bitmap = b ? `<image href="${b.src}" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" preserveAspectRatio="none"/>` : '';
     const style = [l.visible ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');

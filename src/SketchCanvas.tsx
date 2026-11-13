@@ -1,5 +1,5 @@
 import { VectorText } from './VectorText';
-import { newText } from './text';
+import { newText, textOnPath } from './text';
 import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } from 'react';
 import type { ReactNode } from 'react';
 import { PaintDefinitions } from './PaintDefinitions';
@@ -8,7 +8,7 @@ import { pathContours, replaceContour, beginDraft, moveDraft, endDraft, finishPe
   replacePathPoints, transformPath, splitPathEdge, nearestPathEdge, movePathControl,
   pathBounds, boundsContain, resizePoint, resizeBounds, rotatePoint, handlePoint, RESIZE_HANDLES,
   snapPoint, pathSnapTargets, nearestPoint, constrainAngle, TOOL_SHORTCUTS,
-  trimPath, type Draft, type DraftStep, type Point, type SketchTool, type ToolOptions, type Bounds, type ResizeHandle, type SnapGuide } from '@aether/sketch';
+  trimPath, slicePath, type Draft, type DraftStep, type Point, type SketchTool, type ToolOptions, type Bounds, type ResizeHandle, type SnapGuide } from '@aether/sketch';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pathVisible, pathLocked, rootGroup, groupPaths } from './structure';
 import type { NodeSelection, SnapSettings } from './VectorInspector';
@@ -18,7 +18,7 @@ import type { PixelBitmap } from './document';
 import { steadyPoint, strokeConstraint, symmetryMaps, type Guides } from './guides';
 import { GuideOverlay, moveGuide } from './GuideOverlay';
 import { joinOpenPath } from './join';
-import { arrowHeads, cornerIndices, roundCorners, type CornerStyle } from './vector';
+import { cornerIndices, drawnParts, roundCorners, type CornerStyle } from './vector';
 import type { SketchPath } from '@aether/sketch';
 export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'smudge' | 'star' | 'lasso' | 'hand' | 'zoom'
   | 'marquee' | 'marquee-ellipse' | 'marquee-lasso' | 'marquee-polygon' | 'wand' | 'transform' | 'corner' | 'shape' | 'knife';
@@ -153,7 +153,7 @@ export function SketchCanvas(props: Props) {
   const options = (): ToolOptions => ({ coordinateStep: 0, minimumArea: 1, curveTolerance: .25 / scale(), freehandTolerance: 1 / scale(), closeTolerance: 9 / scale(), dragThreshold: 2 / scale(), polygonSides: props.polygonSides, curvedPrimitives: true, closePenOnFinish: false });
   const paths = props.layer?.paths ?? [], editable = paths.filter(p => props.layer && pathVisible(props.layer, p) && !pathLocked(props.layer, p)), selectedPaths = paths.some(p => props.selected.includes(p.id) && props.layer && (pathLocked(props.layer, p) || !pathVisible(props.layer, p))) ? [] : editable.filter(p => props.selected.includes(p.id));
   const shown = preview.length ? preview : selectedPaths, selectedObject = shown.length === 1 ? shown[0] : undefined;
-  const selected = selectedObject && !selectedObject.text ? { ...selectedObject, ...pathContours(selectedObject)[props.contour], subpaths: undefined } : undefined;
+  const selected = selectedObject && (!selectedObject.text || selectedObject.text.onPath) ? { ...selectedObject, ...pathContours(selectedObject)[props.contour], subpaths: undefined } : undefined;
   const replaceNode = (next: DrawingPath | undefined) => next && selectedObject && props.onReplace([{ ...selectedObject, ...replaceContour(selectedObject,props.contour,next) }]);
   const bounds = pathBounds(shown);
   const snap = (at: Point, alt: boolean, exclude: string[] = [], omitNode?: number) => {
@@ -203,7 +203,14 @@ export function SketchCanvas(props: Props) {
     if (props.tool === 'brush' || props.tool === 'eraser' || props.tool === 'paint') stroke.current = { samples: [], pen: e.pointerType === 'pen', start: at, last: at };
     if (props.tool === 'brush' || props.tool === 'eraser') { sample(e, at); if (props.tool === 'brush' && props.pixelBrush) { startDabs(); feedDabs(); } updateDraft(beginDraft('paint', at, false, options())); return; }
     if (props.tool === 'smudge') { startSmudge(at); return; }
-    if (props.tool === 'text') { const text=newText(snap(at,e.altKey)); props.onAdd(text);props.onSelect([text.id]);props.onTool('select');return; }
+    if (props.tool === 'text') {
+      // Clicking the edge of a path sets text along a copy of it; anywhere else makes a text box.
+      const under = editable.find(p => p.id === target.closest('[data-path-id]')?.getAttribute('data-path-id') && !p.text), guide = under && pathContours(under)[0];
+      const hit = guide && nearestPathEdge(guide, at, 8 / scale()), from = hit ? hit.edge + hit.fraction : 0;
+      // Around a closed shape the text starts where it was clicked.
+      const text = guide && hit ? textOnPath(guide.closed ? slicePath(guide, from, from + guide.points.length) ?? guide : guide) : newText(snap(at, e.altKey));
+      props.onAdd(text); props.onSelect([text.id]); props.onTool('select'); return;
+    }
     if (props.tool === 'fill' || props.tool === 'eyedropper') {
       if (props.layer?.kind === 'pixel') { props.onPixelPoint(props.tool, at); return; }
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
@@ -399,10 +406,11 @@ export function SketchCanvas(props: Props) {
         {l.pixels && <image data-pixel-layer={l.id} href={l.pixels.src} x={l.pixels.x} y={l.pixels.y} width={l.pixels.width} height={l.pixels.height} preserveAspectRatio="none" pointerEvents="none" visibility={veiled === l.id ? 'hidden' : undefined} style={{ imageRendering: scale() >= 4 ? 'pixelated' : undefined }} />}
         {props.pending.filter(q => q.layerID === l.id).flatMap(q => q.paths).map(p => <path key={`pending-${p.id}`} data-pixel-pending="true" pointerEvents="none" d={pathData(p)}
           {...paintAttributes({ ...p, fill: p.fillGradient?.stops[0]?.color ?? p.fill, fillGradient: undefined, blurPx: undefined }, '')} style={p.blurPx ? { filter: `blur(${p.blurPx}px)` } : undefined} />)}
-        {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p; const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
-          {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(path, `${ids.get(p.id)}-gradient`)} />}
-          {arrowHeads(path).map(head => <path key={head.id} data-arrow-head="true" pointerEvents="none" d={pathData(head)} {...paintAttributes(head, '')} />)}
-          <path d={pathData(path)} fill={path.text ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale())} />
+        {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p, [body, ...extras] = drawnParts(path); const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
+          {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(body, `${ids.get(p.id)}-gradient`)} />}
+          {extras.map(part => <path key={part.id} data-stroke-part={part.id.slice(p.id.length + 1)} pointerEvents="none" d={pathData(part)} {...paintAttributes(part, '')} />)}
+          {/* The part that takes clicks: a wide invisible stroke, the box of boxed text, or a band along text on a path. */}
+          <path d={pathData(path)} fill={path.text && !path.text.onPath ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale(), path.text?.onPath ? path.text.fontSizePx * 2 : 0)} />
           {props.selected.includes(p.id) && l.id === props.layer?.id && <path className="sketch-selection" d={pathData(path)} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
         </g>;
           return <g key={p.id}>{clipPaths(l, p).reduce<ReactNode>((child, clip) => <g clipPath={`url(#${ids.get(clip.id)}-clip)`}>{child}</g>, content)}</g>;

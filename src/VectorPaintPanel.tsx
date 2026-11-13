@@ -2,7 +2,7 @@ import { Button, Checkbox, ColorField, GradientControls, FieldRow, NumberField, 
 import type { VectorGradient } from '@aether/sketch';
 import type { DrawingPath } from './document';
 import type { PaintStyle } from './paint';
-import { ARROW_HEADS } from './vector';
+import { ARROW_HEADS, WIDTH_PROFILES, type WidthProfile } from './vector';
 export function VectorPaintPanel({ value, disabled, onChange, selected, inside, onInside, onRelease, canRelease }: {
   value: PaintStyle; disabled: boolean; onChange: (patch: Partial<PaintStyle>) => void;
   selected?: DrawingPath; inside: boolean; onInside: () => void; onRelease: () => void; canRelease: boolean;
@@ -27,6 +27,9 @@ export function VectorPaintPanel({ value, disabled, onChange, selected, inside, 
       onChange={e => onChange(e.target.value === 'custom' ? { dashPx: [value.widthPx * 4, value.widthPx * 2] } : { dash: e.target.value as 'solid' | 'dashed' | 'dotted', dashPx: undefined })} /></FieldRow>
     {value.dashPx && (['Dash', 'Gap'] as const).map((label, i) => <FieldRow key={label} label={`${label} length`}><NumberField aria-label={`${label} length`} value={value.dashPx![i]} min={.1} max={10000} unit="px"
       onCommit={v => onChange({ dashPx: i ? [value.dashPx![0], v] : [v, value.dashPx![1]] })} /></FieldRow>)}
+    <FieldRow label="Line width profile"><SelectField aria-label="Width profile" value={value.widthProfile ?? 'even'}
+      options={[{ value: 'even', label: 'even' }, ...(Object.keys(WIDTH_PROFILES) as WidthProfile[]).map(value => ({ value, label: { 'taper-end': 'taper to the end', 'taper-start': 'taper from the start', 'taper-both': 'taper both ends', pinch: 'pinch the middle' }[value] }))]}
+      onChange={e => onChange({ widthProfile: e.target.value === 'even' ? undefined : e.target.value as WidthProfile })} /></FieldRow>
     {(['arrowStart', 'arrowEnd'] as const).map(key => <FieldRow key={key} label={key === 'arrowStart' ? 'Start of line' : 'End of line'}>
       <SelectField aria-label={key === 'arrowStart' ? 'Arrowhead at start' : 'Arrowhead at end'} value={value[key] ?? 'none'} options={[{ value: 'none', label: 'none' }, ...ARROW_HEADS.map(value => ({ value, label: value }))]}
         onChange={e => onChange({ [key]: e.target.value === 'none' ? undefined : e.target.value })} /></FieldRow>)}

@@ -1,5 +1,5 @@
 import { pathBounds, pathData, type Point } from '@aether/sketch';
-import { arrowHeads, dashArray } from './vector';
+import { dashArray, drawnParts } from './vector';
 import type { DrawingPath, Layer, PixelBitmap } from './document';
 import type { BrushStyle, Dab } from './brush';
 
@@ -199,7 +199,7 @@ const LIMIT = `A pixel layer can be up to ${PIXEL_MAX_SIDE} px wide and tall. Ad
 
 /** Paint or erase these paths on a pixel layer, inside `clip` when there is a selection. Null when nothing would change. */
 export async function paintPixels(current: PixelBitmap | undefined, drawn: DrawingPath[], mode: 'paint' | 'erase', clip?: PixelSelection | null): Promise<PixelResult> {
-  const paths = drawn.flatMap(p => [p, ...arrowHeads(p)]);
+  const paths = drawn.flatMap(drawnParts);
   const marked = paintedRect(paths); if (!marked || (mode === 'erase' && !current)) return null;
   const rect = mode === 'erase' ? current! : unionRect(current, marked)!;
   if (tooLarge(rect)) return { problem: LIMIT };

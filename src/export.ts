@@ -1,8 +1,8 @@
 import { pathContours, type SketchPath } from '@aether/sketch';
-import { arrowHeads, dashArray } from './vector';
+import { dashArray, drawnParts } from './vector';
 import { clipPaths, drawingSVG, exportArea } from './paint';
 import { pathVisible } from './structure';
-import { textMatrix } from './text';
+import { pathGlyphs, textMatrix } from './text';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 
 type Area = ReturnType<typeof exportArea>;
@@ -58,7 +58,10 @@ export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Ar
       `${{ butt: 0, round: 1, square: 2 }[p.lineCap ?? 'round']} J ${{ miter: 0, round: 1, bevel: 2 }[p.lineJoin ?? 'round']} j`,
       `[${(dashArray(p) ?? []).map(num).join(' ')}] 0 d`];
     for (const clip of clipPaths(layer, p)) ops.push(`${contourOps(clip)} W${clip.fillRule === 'evenodd' ? '*' : ''} n`);
-    if (p.text) {
+    if (p.text?.onPath) {
+      // Each character is set on its own along the path.
+      for (const g of pathGlyphs(p)) { const c = num(Math.cos(g.angle)), s = num(Math.sin(g.angle)); ops.push(`BT /F1 ${num(p.text.fontSizePx)} Tf ${c} ${s} ${s} ${num(-Math.cos(g.angle))} ${num(g.x)} ${num(g.y)} Tm ${pdfString(g.char)} Tj ET`); }
+    } else if (p.text) {
       // ponytail: Helvetica (a PDF base font) with ASCII text; embed fonts if documents need other scripts.
       const t = p.text, [a, b, c, d, e, f] = textMatrix(p), x0 = t.align === 'start' ? 0 : t.align === 'middle' ? t.widthPx / 2 : t.widthPx;
       t.content.split('\n').forEach((line, i) => {
@@ -68,7 +71,7 @@ export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Ar
     } else ops.push(`${contourOps(p)} ${fill && stroke ? 'B' : fill ? 'f' : 'S'}${fill && p.fillRule === 'evenodd' ? '*' : ''}`);
     return `q ${ops.join(' ')} Q`;
   };
-  const layers = [...doc.layers].reverse().filter(l => l.visible).map(l => ({ layer: l, content: l.paths.filter(p => pathVisible(l, p)).flatMap(p => [p, ...arrowHeads(p)]).map(p => shape(p, l)).filter(Boolean).join('\n') }));
+  const layers = [...doc.layers].reverse().filter(l => l.visible).map(l => ({ layer: l, content: l.paths.filter(p => pathVisible(l, p)).flatMap(drawnParts).map(p => shape(p, l)).filter(Boolean).join('\n') }));
   const page = layers.map(({ layer }, i) => `q ${state(layer.opacity ?? 1, layer.opacity ?? 1, PDF_BLEND[layer.blend ?? 'normal'])} /L${i} Do Q`).join('\n');
   const matrix = `${num(s)} 0 0 ${num(-s)} ${num(-area.x * s)} ${num((area.y + area.height) * s)}`;
   const width = num(area.width * s), height = num(area.height * s);

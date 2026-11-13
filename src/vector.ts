@@ -1,4 +1,4 @@
-import { pathContours, pathIntersections, pointInPolygon, replaceContour, samplePath, slicePath, splitCurve, strokeDash, lerp,
+import { booleanPaths, pathContours, pathIntersections, pointInPolygon, polygonArea, replaceContour, samplePath, slicePath, splitCurve, strokeDash, lerp,
   type Bounds, type CubicControls, type NodeMode, type Point, type SketchPath } from '@aether/sketch';
 import type { DrawingPath } from './document';
 
@@ -33,6 +33,67 @@ export function arrowHeads(p: DrawingPath): DrawingPath[] {
   const differs = (a: Point | undefined, b: Point) => a && length(sub(a, b)) > 1e-9 ? a : undefined;
   return [...head(p.arrowStart, p.points[0], differs(p.curves?.[0]?.c1, p.points[0]) ?? p.points[1], 'start'),
     ...head(p.arrowEnd, p.points[n - 1], differs(p.curves?.[n - 2]?.c2, p.points[n - 1]) ?? p.points[n - 2], 'end')];
+}
+
+/** Width profiles: how a stroke's width changes along its length, as a fraction (0–1) of the stroke width at each fraction of the way. */
+export const WIDTH_PROFILES = { 'taper-end': (t: number) => 1 - t, 'taper-start': (t: number) => t, 'taper-both': (t: number) => Math.sin(Math.PI * t), pinch: (t: number) => 1 - .75 * Math.sin(Math.PI * t) } as const;
+export type WidthProfile = keyof typeof WIDTH_PROFILES;
+/** The stroke of an open path, varying in width, as one closed outline around it. Empty when the path is too short to show. */
+export function profileOutline(path: SketchPath, widthPx: number, profile: WidthProfile): Point[] {
+  const points = samplePath(path, .25);
+  const lengths = points.reduce<number[]>((all, p, i) => [...all, i ? all[i - 1] + length(sub(p, points[i - 1])) : 0], []), total = lengths[lengths.length - 1];
+  if (!(total > 0)) return [];
+  // Even steps along the path, so a straight edge with two nodes still swells and tapers.
+  const steps = Math.min(400, Math.max(8, Math.ceil(total / 4))), left: Point[] = [], right: Point[] = [];
+  for (let i = 0, at = 0; i <= steps; i++) {
+    const s = total * i / steps; while (at < points.length - 2 && lengths[at + 1] < s) at++;
+    const span = lengths[at + 1] - lengths[at] || 1, p = lerp(points[at], points[at + 1], (s - lengths[at]) / span), d = unit(sub(points[at + 1], points[at]));
+    const half = widthPx / 2 * WIDTH_PROFILES[profile](i / steps);
+    left.push([p[0] - d[1] * half, p[1] + d[0] * half]); right.push([p[0] + d[1] * half, p[1] - d[0] * half]);
+  }
+  return [...left, ...right.reverse()];
+}
+/**
+ * What every renderer draws for a path: the path itself, then its arrowheads. With a width profile, the path loses its
+ * plain stroke and a filled outline of varying width is drawn in its place.
+ * ponytail: dashes do not apply to a profiled stroke, and with object opacity below 100% it shows through over the fill.
+ */
+export function drawnParts(p: DrawingPath): DrawingPath[] {
+  // Open paths only: a profile set for lines stays on as the drawing style, and should not warp the next rectangle's outline.
+  const outline = p.widthProfile && !p.closed && p.strokeEnabled !== false && !p.text ? profileOutline(p, p.widthPx, p.widthProfile) : [];
+  if (outline.length < 3) return [p, ...arrowHeads(p)];
+  const stroke: DrawingPath = { id: `${p.id}-stroke`, groupID: p.groupID, points: outline, closed: true, color: p.color, fill: p.color, fillOpacity: p.strokeOpacity ?? 1, strokeEnabled: false, widthPx: p.widthPx, opacity: p.opacity };
+  return [{ ...p, strokeEnabled: false }, stroke, ...arrowHeads(p)];
+}
+
+// ---- Divide ----
+/** The separate islands of a Boolean result: each outer ring with the holes that follow it (holes wind the other way). */
+function islands(path: SketchPath): SketchPath[] {
+  const rings = pathContours(path), outer = Math.sign(polygonArea(rings[0].points)), groups: SketchPath[][] = [];
+  for (const ring of rings) { if (Math.sign(polygonArea(ring.points)) === outer || !groups.length) groups.push([ring]); else groups[groups.length - 1].push(ring); }
+  return groups.map(([first, ...holes]) => ({ points: first.points, closed: true, ...(holes.length ? { subpaths: holes.map(h => ({ points: h.points, closed: true })), fillRule: 'evenodd' as const } : {}) }));
+}
+/**
+ * Divide overlapping closed shapes into every separate region they form, so the pieces can be kept, deleted or united.
+ * `top` is the index of the front-most shape covering each piece, whose paint it takes. Shapes are in back-to-front order.
+ * ponytail: built on the polygon Booleans, so curves become short straight edges at `tolerance`.
+ */
+export function dividePaths(paths: SketchPath[], tolerance: number): { path: SketchPath; top: number }[] {
+  let pieces: { path: SketchPath; top: number }[] = [];
+  paths.forEach((shape, index) => {
+    const next: typeof pieces = []; let rest: SketchPath | null = shape;
+    for (const piece of pieces) {
+      const outside = booleanPaths([piece.path, shape], 'difference', tolerance), inside = booleanPaths([piece.path, shape], 'intersection', tolerance);
+      if (outside) next.push({ path: outside, top: piece.top });
+      if (inside) next.push({ path: inside, top: index });
+      rest = rest && booleanPaths([rest, piece.path], 'difference', tolerance);
+    }
+    if (rest) next.push({ path: rest, top: index });
+    pieces = next;
+  });
+  // Shared edges leave slivers thinner than the tolerance; they are not regions anyone drew.
+  const real = (p: SketchPath) => Math.abs(polygonArea(samplePath(p, tolerance))) > tolerance * tolerance * 4;
+  return pieces.flatMap(({ path, top }) => (path === paths[top] ? [path] : islands(path)).filter(real).map(island => ({ path: island, top })));
 }
 
 // ---- Corner tool ----
