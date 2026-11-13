@@ -35,6 +35,9 @@ interface Props {
   paint: PaintStyle; polygonSides: number; brush: BrushSettings; drawGuides: Guides; onDrawGuides: (guides: Guides) => void; onFill: (path: DrawingPath) => void; onPickPaint: (path: DrawingPath) => void;
   selected: string[]; onSelect: (ids: string[]) => void; node: NodeSelection | null; onNode: (node: NodeSelection | null) => void;
   snap: SnapSettings; onAdd: (path: DrawingPath) => void; onReplace: (paths: DrawingPath[]) => void;
+  /** Strokes on their way into a pixel layer: shown as vectors until the bitmap holding them arrives. */
+  /** Lines and pen paths continue the open path they start or end on (vector drawing only). */
+  joinPaths: boolean; pending: { layerID: string; paths: DrawingPath[] }[]; onErasePixels: (outline: Point[]) => void; onPixelPoint: (tool: 'fill' | 'eyedropper', at: Point) => void;
   onSplice: (ids: string[], paths: DrawingPath[]) => void; onDelete: () => void; undo: () => void; redo: () => void;
 }
 type Drag = { origin: Point; paths: DrawingPath[]; node?: number; control?: 'c1' | 'c2'; handle?: ResizeHandle | 'rotate'; bounds: Bounds; anchor: Point };
@@ -87,7 +90,7 @@ export function SketchCanvas(props: Props) {
           closed: step.closed ?? (props.tool !== 'paint' && props.tool !== 'line'), ...props.paint };
         // Lines and pen paths that meet a free end continue that path (and close it on its start).
         // ponytail: not with symmetry on, where each mirrored copy would need its own join.
-        const joined = (props.tool === 'line' || props.tool === 'pen') && !props.drawGuides.symmetry ? joinOpenPath(path, editable, options().closeTolerance) : { path, removed: [] };
+        const joined = props.joinPaths && (props.tool === 'line' || props.tool === 'pen') && !props.drawGuides.symmetry ? joinOpenPath(path, editable, options().closeTolerance) : { path, removed: [] };
         if (joined.removed.length) props.onSplice(joined.removed, [joined.path]); else props.onAdd(path);
         props.onSelect([joined.path.id]); props.onNode(null);
       }
@@ -107,6 +110,7 @@ export function SketchCanvas(props: Props) {
     if (props.tool === 'brush' || props.tool === 'eraser') { sample(e, at); updateDraft(beginDraft('paint', at, false, options())); return; }
     if (props.tool === 'text') { const text=newText(snap(at,e.altKey)); props.onAdd(text);props.onSelect([text.id]);props.onTool('select');return; }
     if (props.tool === 'fill' || props.tool === 'eyedropper') {
+      if (props.layer?.kind === 'pixel') { props.onPixelPoint(props.tool, at); return; }
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
       if (path) { if (props.tool === 'eyedropper') props.onPickPaint(path); else if (path.closed) { props.onSelect([path.id]); props.onFill(path); } }
       return;
@@ -197,7 +201,8 @@ export function SketchCanvas(props: Props) {
         const path: DrawingPath = { ...props.paint, id: crypto.randomUUID(), name: 'Brush stroke', points: outline, closed: true, fill: props.paint.color, fillGradient: undefined, fillOpacity: 1, strokeEnabled: false,
           opacity: brushOpacity(style, samples), ...(style.softness > 0 ? { blurPx: style.softness * style.sizePx / scale() * .35 } : {}) };
         props.onAdd(path); props.onSelect([]);
-      } else if (props.tool === 'eraser') { const { ids, next } = eraseWith(editable, outline, .5 / scale()); if (ids.length) props.onSplice(ids, next); }
+      } else if (props.tool === 'eraser' && props.layer?.kind === 'pixel') { if (outline.length > 2) props.onErasePixels(outline); }
+      else if (props.tool === 'eraser') { const { ids, next } = eraseWith(editable, outline, .5 / scale()); if (ids.length) props.onSplice(ids, next); }
     }
     else if (draftRef.current) {
       const d = draftRef.current, raw = point(e), at = d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? raw : snap(raw, e.altKey);
@@ -256,6 +261,9 @@ export function SketchCanvas(props: Props) {
       {!props.doc.infinite && <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />}
       {props.snap.grid && !props.doc.infinite && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
       {[...props.doc.layers].reverse().filter(l => l.visible).map(l => <g key={l.id} data-layer-id={l.id} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none', opacity: l.opacity, mixBlendMode: l.blend }}>
+        {l.pixels && <image data-pixel-layer={l.id} href={l.pixels.src} x={l.pixels.x} y={l.pixels.y} width={l.pixels.width} height={l.pixels.height} preserveAspectRatio="none" pointerEvents="none" style={{ imageRendering: scale() >= 4 ? 'pixelated' : undefined }} />}
+        {props.pending.filter(q => q.layerID === l.id).flatMap(q => q.paths).map(p => <path key={`pending-${p.id}`} data-pixel-pending="true" pointerEvents="none" d={pathData(p)}
+          {...paintAttributes({ ...p, fill: p.fillGradient?.stops[0]?.color ?? p.fill, fillGradient: undefined, blurPx: undefined }, '')} style={p.blurPx ? { filter: `blur(${p.blurPx}px)` } : undefined} />)}
         {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p; const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
           {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(path, `${ids.get(p.id)}-gradient`)} />}
           <path d={pathData(path)} fill={path.text ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale())} />
@@ -266,7 +274,9 @@ export function SketchCanvas(props: Props) {
       </g>)}
       <GuideOverlay guides={props.drawGuides} scale={scale()} />
       {marquee && <rect {...marquee} className="sketch-marquee" pointerEvents="none" vectorEffect="non-scaling-stroke" />}
-      {draft && brushing && <path className={`sketch-brush-preview${props.tool === 'eraser' ? ' sketch-eraser-preview' : ''}`} d={`M${strokeOutline().map(p => p.join(',')).join('L')}Z`} fill={props.tool === 'brush' ? props.paint.color : undefined} pointerEvents="none" />}
+      {draft && brushing && <path className={`sketch-brush-preview${props.tool === 'eraser' ? ' sketch-eraser-preview' : ''}`} d={`M${strokeOutline().map(p => p.join(',')).join('L')}Z`} fill={props.tool === 'brush' ? props.paint.color : undefined} pointerEvents="none"
+        // The stroke in progress already looks like the finished one: same opacity, same soft edge.
+        {...(props.tool === 'brush' && stroke.current ? { opacity: brushOpacity(props.brush.style, stroke.current.samples), style: props.brush.style.softness > 0 ? { filter: `blur(${props.brush.style.softness * props.brush.style.sizePx / scale() * .35}px)` } : undefined } : {})} />}
       {draft && !brushing && <polyline className="sketch-draft" points={(draft.tool === 'paint' ? draft.points : props.tool === 'star' ? starShape(previewShape(draft)) : previewShape(draft)).map(p => p.join(',')).join(' ')} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
       {guides.map((g, i) => <g className="sketch-snap-guide" key={i} pointerEvents="none" aria-label={`Snap ${g.label}`}><line x1={g.from[0]} y1={g.from[1]} x2={g.to[0]} y2={g.to[1]} vectorEffect="non-scaling-stroke" /><circle cx={g.to[0]} cy={g.to[1]} r={pin * 1.5} vectorEffect="non-scaling-stroke" /><text x={g.to[0] + pin * 2} y={g.to[1] - pin * 2} fontSize={11 / scale()}>{g.label}</text></g>)}
       {draft?.tangents?.map((t, i) => { const p = draft.points[i]; return <g key={i} className="sketch-tangent" pointerEvents="none"><line x1={p[0] - t[0]} y1={p[1] - t[1]} x2={p[0] + t[0]} y2={p[1] + t[1]} vectorEffect="non-scaling-stroke" /><circle cx={p[0] + t[0]} cy={p[1] + t[1]} r={pin} /></g>; })}

@@ -14,7 +14,8 @@ import { RegionInspector } from './RegionInspector';
 import { TextInspector } from './TextInspector';
 import { importSVG } from './svg-import';
 import { saveRecovery, type Recovery } from './recovery';
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import { DriveBrowser, DocumentTabBrowser, FileIcon, StandardAppShell, FreeformCanvas, type FreeformCamera, type FreeformCanvasController, type FreeformChange, type FreeformItem, type FreeformPoint, type WorkspacePanelState } from '@aether/ui';
 import { pathBounds } from '@aether/sketch';
 import { alignPaths, distributePaths, flipPaths, orderPaths, rotatePaths, type AlignMode, type OrderMode } from './arrange';
@@ -38,7 +39,8 @@ import { symmetryCopies, type Guides } from './guides';
 import { ancestors } from './structure';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
-import { BLEND_MODES, readDocument, serializeDocument, newDocument, type BlendMode, type DrawingPath, type Layer } from './document';
+import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
+import { fillPixels, paintPixels, pixelBounds, samplePixel, unionRect, type PixelResult } from './pixels';
 import { useDocument } from './useDocument';
 import './sketch.css';
 /** Every drawing tool, with a name and a recognisable icon. Keys: V select, H hand, Z zoom, B brush, Shift+B pencil,
@@ -61,7 +63,7 @@ const TOOL_TABS: { id: string; label: string; groups: { id: string; label: strin
     { id: 'colour', label: 'Fill and colour', tools: ['fill', 'freehand', 'eyedropper'] }] },
   { id: 'shapes', label: 'Shapes', groups: [{ id: 'lines', label: 'Lines', tools: ['line', 'pen'] }, { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
   { id: 'edit', label: 'Edit', groups: [{ id: 'select', label: 'Select', tools: ['select', 'lasso', 'node', 'trim'] }] },
-  { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint'] },
+  { id: 'paths', label: 'Paths', groups: [{ id: 'navigate', label: 'Navigate', tools: ['select', 'node', 'hand', 'zoom'] }, { id: 'lines', label: 'Lines', tools: ['pen', 'line', 'paint', 'brush'] },
     { id: 'shapes', label: 'Shapes', tools: ['rect', 'ellipse', 'polygon', 'star'] }, { id: 'paint', label: 'Paint', tools: ['fill', 'eyedropper'] }, { id: 'text', label: 'Text', tools: ['text'] }] },
 ];
 /** One app, two workspaces on the same drawing (Affinity-style personas): Pixel paints like SketchBook and Fresco, Vector edits paths like Affinity Designer and Illustrator. */
@@ -138,7 +140,9 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const [snap, setSnap] = useState<SnapSettings>({ enabled: true, grid: false, gridStepPx: 20, distancePx: 8 });
   const [saved, setSaved] = useState(() => serializeDocument(doc));
   const [documentIdentity,setDocumentIdentity]=useState('initial');
-  const persistence=useHostedDocument({app:'sketch',identity:documentIdentity,text:serializeDocument(doc),name:`${name}.aethersketch`,onLoad:(text,file)=>{
+  // Serialised once per drawing state, not once per render: pixel layers make the text megabytes long.
+  const documentText = useMemo(() => serializeDocument(doc), [doc]);
+  const persistence=useHostedDocument({app:'sketch',identity:documentIdentity,text:documentText,name:`${name}.aethersketch`,onLoad:(text,file)=>{
     const next=readDocument(text);history.open(next);setLayerID(next.layers[0].id);setSelected([]);setNode(null);setInsideID(null);setContour(0);setEpoch(e=>e+1);
     if(file)setName(file.name.replace(/\.aethersketch$/i,''));
   }});
@@ -166,7 +170,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const selectBoard = (ids: string[]) => { setBoardSelection(ids); if (ids.length) { setSelected([]); setNode(null); } };
   const chosenBoard = board.filter(i => boardSelection.includes(i.id));
   const artboard = { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
-  const drawn = pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths));
+  const drawn = unionRect(pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths)), pixelBounds(doc.layers));
   const contentBounds = doc.infinite ? drawn ?? artboard : drawn ? { x: Math.min(0, drawn.x), y: Math.min(0, drawn.y), width: Math.max(doc.widthPx, drawn.x + drawn.width) - Math.min(0, drawn.x), height: Math.max(doc.heightPx, drawn.y + drawn.height) - Math.min(0, drawn.y) } : artboard;
   // Gallery-free storage rule: files become items here; images are embedded as data URLs, other files as named cards.
   const attach = async (files: File[], at: FreeformPoint) => {
@@ -180,7 +184,43 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     }
     if (added.length) { changeBoard([...board, ...added]); selectBoard(added.map(i => i.id)); setNotice(files.some(f => !IMAGE_TYPES.includes(f.type)) ? 'Files added as cards; only PNG, JPEG, GIF and WebP images are embedded.' : 'Image added to the board.'); }
   };
-  const add = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
+  const docRef = useRef(doc); docRef.current = doc;
+  const [pending, setPending] = useState<{ id: string; layerID: string; paths: DrawingPath[] }[]>([]), pixelQueue = useRef<Promise<void>>(Promise.resolve());
+  /** One bitmap edit at a time, each starting from what the last one left. `shown` stays on screen as vectors until the new bitmap is in the drawing. */
+  const editPixels = (layerID: string, shown: DrawingPath[], edit: (current: PixelBitmap | undefined) => Promise<PixelResult>) => {
+    const id = crypto.randomUUID(), done = () => setPending(q => q.filter(x => x.id !== id));
+    if (shown.length) setPending(q => [...q, { id, layerID, paths: shown }]);
+    pixelQueue.current = pixelQueue.current.then(async () => {
+      try {
+        const result = await edit(docRef.current.layers.find(l => l.id === layerID)?.pixels);
+        if (result && 'problem' in result) setNotice(result.problem);
+        // Rendered at once, so the next queued edit reads this bitmap and the vector preview never doubles it.
+        if (result && 'bitmap' in result) flushSync(() => { commit(d => ({ ...d, layers: d.layers.map(l => l.id === layerID && l.kind === 'pixel' ? { ...l, pixels: result.bitmap } : l) })); done(); });
+        // The Studio server stores drawings up to 16 MB; say so before a save can fail.
+        const megabytes = docRef.current.layers.reduce((n, l) => n + (l.pixels?.src.length ?? 0), 0) / 1e6;
+        if (megabytes > 12) setNotice(`The pixel layers now take about ${Math.round(megabytes)} MB. Drawings over 16 MB cannot be saved to the server, so remove a pixel layer or export before painting much more.`);
+      } catch (error) { setNotice(error instanceof Error ? error.message : 'The pixel layer could not be changed.'); }
+      done();
+    });
+  };
+  const addVector = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
+  /** The Pixel workspace paints pixels and the Vector workspace draws paths, whatever layer is current: when the
+   * current layer is the other kind, a layer of the right kind is added above it (Affinity's assistant). Text is always a vector object. */
+  const add = (paths: DrawingPath[]) => {
+    const pixels = workspace === 'pixel' && !paths.some(p => p.text);
+    if (pixels === (layer.kind === 'pixel')) { if (pixels) editPixels(layer.id, paths, current => paintPixels(current, paths, 'paint')); else addVector(paths); return; }
+    // An empty layer of the other kind simply becomes the kind being drawn, so a new drawing does not start with a spare layer.
+    if (layer.kind === 'pixel' ? !layer.pixels : !layer.paths.length && !layer.groups?.length) {
+      commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return pixels ? { ...rest, kind: 'pixel' as const } : { ...rest, paths }; }) }));
+      if (pixels) editPixels(layer.id, paths, current => paintPixels(current, paths, 'paint'));
+      return;
+    }
+    const created: Layer = pixels ? newPixelLayer(`Layer ${doc.layers.length + 1}`) : { ...newLayer(`Layer ${doc.layers.length + 1}`), paths };
+    commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), created, ...d.layers.slice(at)] }; });
+    setLayerID(created.id); setInsideID(null); setNotice(pixels ? 'Painting on a new pixel layer.' : 'Drawing on a new vector layer.');
+    if (pixels) editPixels(created.id, paths, current => paintPixels(current, paths, 'paint'));
+  };
+  const erasePixels = (outline: [number, number][]) => editPixels(layer.id, [], current => paintPixels(current, [{ id: 'eraser', points: outline, closed: true, fill: '#000000', color: '#000000', widthPx: 1, opacity: 1, strokeEnabled: false }], 'erase'));
   const setStyle = (patch: Partial<DrawingPath>) => { if (!disabled) replace(chosen.map(p => ({ ...p, ...patch }))); };
   const chooseTool = (next: AppTool) => { setTool(next); setNode(null); };
   /** Where a new guide appears: the middle of the view. */
@@ -198,6 +238,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const pickColour = (hex: string) => {
     setPaint(p => ({ ...p, color: hex })); setRecentColours(r => [hex, ...r.filter(c => c !== hex)].slice(0, 10));
     if (chosen.length && !disabled) replace(chosen.map(p => p.strokeEnabled === false ? { ...p, fill: hex, fillGradient: undefined } : { ...p, color: hex }));
+  };
+  /** Fill and eyedropper on a pixel layer work on its pixels. Fill is bounded by the page, or by everything drawn on an infinite canvas. */
+  const pixelPoint = (which: 'fill' | 'eyedropper', at: [number, number]) => {
+    if (which === 'fill') { editPixels(layer.id, [], current => fillPixels(current, at, paint.color, doc.infinite ? drawn ?? artboard : artboard)); return; }
+    void samplePixel(layer.pixels, at).then(hex => { if (hex) pickColour(hex); setNotice(hex ? `Picked ${hex}.` : 'Nothing is painted there on this layer.'); }).catch(() => setNotice('The colour could not be read.'));
   };
   const undo = () => { setEpoch(e => e + 1); history.undo(); }, redo = () => { setEpoch(e => e + 1); history.redo(); };
   const agentInteraction=useAgentInteraction({contextKey:`${documentIdentity}:${persistence.file?.id??draftID.current}:${location.search}`,doc,
@@ -217,7 +262,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     const save = () => {
       let tabSaved=false;
       try { saveRecovery(sessionStorage,recoveryKey,{doc,name});tabSaved=true; } catch { /* IndexedDB can still save documents larger than session storage. */ }
-      if(!doc.layers.some(l=>l.paths.length)) {setRecoveryStatus(tabSaved?'Empty draft saved in this tab':'Draft recovery failed — use Save');return;}
+      if(!doc.layers.some(l=>l.paths.length||l.pixels)) {setRecoveryStatus(tabSaved?'Empty draft saved in this tab':'Draft recovery failed — use Save');return;}
       void writeDraft({id,scope:recoveryKey,doc,name,updated:Date.now()}).then(()=>setRecoveryStatus('Draft saved locally')).catch(()=>setRecoveryStatus(tabSaved?'Draft saved in this tab; durable storage unavailable':'Draft recovery failed — use Save to keep your drawing'));
     };
     flushRecovery.current=save;
@@ -236,10 +281,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       const data = format.id === 'export' ? new Blob([drawingSVG(doc)], { type: format.mime }) : format.id === 'export-pdf' ? new Blob([drawingPDF(doc) as BlobPart], { type: format.mime })
         : format.id === 'export-ora' ? new Blob([await drawingOpenRaster(doc) as BlobPart], { type: format.mime }) : await rasterBlob(doc, format.mime as 'image/png' | 'image/jpeg' | 'image/webp');
       const url = URL.createObjectURL(data), a = document.createElement('a'); a.href = url; a.download = `${name}.${format.extension}`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(`${doc.infinite ? 'Drawing' : 'Artboard'} exported as ${format.extension.toUpperCase()}.`);
+      setNotice(format.id === 'export-pdf' && doc.layers.some(l => l.visible && l.pixels) ? 'Exported as PDF without the pixel layers: PDF export is vector only for now. PNG and OpenRaster include them.'
+        : `${doc.infinite ? 'Drawing' : 'Artboard'} exported as ${format.extension.toUpperCase()}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Export failed.'); }
   };
-  const save = () => { const text = serializeDocument(doc); download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
+  const save = () => { const text = documentText; download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
   const editCommand = (id: string) => {
     const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
     const sample = SAMPLES.find(x => x.id === id); if (sample) { openSample(sample); return; }
@@ -266,7 +312,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
         {id:'import',label:'Import SVG…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},...EXPORTS.map(f=>({id:f.id,label:f.label,icon:<AetherIcon name="export"/>})),
         {id:'undo',label:'Undo',disabled:!history.canUndo,separatorBefore:true},{id:'redo',label:'Redo',disabled:!history.canRedo},
-      ]} onSelect={id=>{if(id==='new')newDrawing();else if(id==='open')file.current?.click();else if(id==='import')svgFile.current?.click();else if(id==='save')save();else if(id==='undo')undo();else if(id==='redo')redo();}}><AetherIcon name="menu"/></MenuButton>;
+      ]} onSelect={id=>{if(id==='new')newDrawing();else runCommand(id);}}><AetherIcon name="menu"/></MenuButton>;
   const searchCommands = [
     ...DRAW_TOOLS.map(id => ({ id, label: TOOL_INFO[id].label, category: 'Tools', icon: TOOL_INFO[id].icon })),
     ...GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, category: 'Guides', icon: g.icon })),
@@ -301,7 +347,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   useEffect(() => { const t = window.setTimeout(() => canvasController.current?.fit(), 0); return () => window.clearTimeout(t); }, [documentIdentity]);
   const saveState = (isLocalDocument() || isStudioHosted())
     ? (persistence.state.phase === 'saved' ? 'Saved' : persistence.state.phase === 'saving' || persistence.state.phase === 'pending' ? 'Saving…' : persistence.ready ? 'Not saved' : 'Opening…')
-    : serializeDocument(doc) !== saved ? 'Unsaved changes' : '';
+    : documentText !== saved ? 'Unsaved changes' : '';
   const drive = isStudioHosted()
     ? <DriveBrowser documentID={persistence.file?.id ?? null} app="sketch" documentNoun="drawing" request={driveRequest} flush={persistence.flush}
         describe={f => ({ icon: <FileIcon icon={fileIcon(f as DriveFile)} />, type: fileType(f as DriveFile) })} onOpen={f => { location.assign(editorURL(f as DriveFile)); }}
@@ -315,7 +361,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     <input hidden ref={svgFile} type="file" accept=".svg,image/svg+xml" aria-label="Import SVG file" onChange={async e => {
       const input=e.currentTarget, f=input.files?.[0]; if(!f)return;
       try { const imported=importSVG(await f.text());
-        commit(d=>({...d,...(!d.layers.some(l=>l.paths.length)?{widthPx:imported.doc.widthPx,heightPx:imported.doc.heightPx}:{}),layers:[...imported.doc.layers,...d.layers]}));
+        commit(d=>({...d,...(!d.layers.some(l=>l.paths.length||l.pixels)?{widthPx:imported.doc.widthPx,heightPx:imported.doc.heightPx}:{}),layers:[...imported.doc.layers,...d.layers]}));
         setLayerID(imported.doc.layers[0].id);select(imported.doc.layers[0].paths.filter(p=>!p.hidden).map(p=>p.id));chooseTool('select');
         setNotice(imported.warnings.length ? `SVG imported. ${imported.warnings.join(' ')}` : 'SVG imported as editable vectors.');
       } catch(error) {setNotice(error instanceof Error?error.message:'SVG import failed.');} input.value='';
@@ -371,7 +417,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         ] },
       ] },
     ] }}
-      tree={{ title: 'Layers', icon: <AetherIcon name="layers" />, content: <LayersPanel doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
+      tree={{ title: 'Layers', icon: <AetherIcon name="layers" />, content: <LayersPanel pixel={workspace === 'pixel'} doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
         onDeleteBoard={ids => { changeBoard(board.filter(i => !ids.includes(i.id) && !(i.kind === 'connector' && (ids.includes(i.from ?? '') || ids.includes(i.to ?? ''))))); setBoardSelection([]); }}
         onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> }}
       advisor={<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>}
@@ -421,6 +467,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
           layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
+        pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'}
         onPickPaint={p => { setPaint(copyPaint(p)); setSelected([]); setNotice("Appearance picked. Choose Fill shape or draw with it."); }} onFill={target => changeLayer(l => l.locked || !l.visible ? l : { ...l, paths: l.paths.map(p => p.id === target.id && p.closed && !pathLocked(l, p) && pathVisible(l, p) ? { ...p, fill: paint.fill, fillGradient: paint.fillGradient, fillOpacity: paint.fillOpacity } : p) })} onReplace={replace} onDelete={remove} undo={undo} redo={redo} />} />
       </div>
     </StandardAppShell>

@@ -8,11 +8,15 @@ export interface PathGroup { clipPathID?: string; id: string; name: string; pare
 export const BLEND_MODES = ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'] as const;
 export type BlendMode = typeof BLEND_MODES[number];
 /** `opacity` (0–1) and `blend` are optional; absent means 1 and normal. */
-export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode }
+/** A pixel layer's bitmap: a PNG covering `width`×`height` document pixels from (`x`, `y`). */
+export interface PixelBitmap { x: number; y: number; width: number; height: number; src: string }
+/** A layer holds vector paths, or (`kind: 'pixel'`) one bitmap and no paths. `pixels` is absent until something is painted. */
+export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode; kind?: 'pixel'; pixels?: PixelBitmap }
 /** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none.
  * `infinite` drawings have no artboard: exports frame whatever is drawn. Older drawings keep their artboard. */
 export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean }
 export function newLayer(name: string): Layer { return { id: crypto.randomUUID(), name, visible: true, locked: false, paths: [] }; }
+export function newPixelLayer(name: string): Layer { return { ...newLayer(name), kind: 'pixel' }; }
 export function newDocument(): SketchDocument { return { format: 'aethersketch', version: 2, widthPx: 1200, heightPx: 800, infinite: true, layers: [newLayer('Layer 1')] }; }
 export const serializeDocument = (doc: SketchDocument) => JSON.stringify(doc, null, 2);
 
@@ -46,6 +50,15 @@ export function readDocument(text: string): SketchDocument {
     check(layer && typeof layer === 'object'); id(layer.id);
     check(typeof layer.name === 'string' && layer.name.length <= 200 && typeof layer.visible === 'boolean' && typeof layer.locked === 'boolean');
     check(Array.isArray(layer.paths) && layer.paths.length <= 10000);
+    check(layer.kind === undefined || layer.kind === 'pixel');
+    check(layer.pixels === undefined || layer.kind === 'pixel');
+    if (layer.kind === 'pixel') check(layer.paths.length === 0 && !layer.groups?.length);
+    if (layer.pixels !== undefined) {
+      // PNG data only: the bitmap is shown as an image, never run. Sizes match the editor's limit (pixels.ts).
+      const b = layer.pixels, whole = (v: unknown, min: number, max: number) => Number.isInteger(v) && number(v, min, max);
+      check(b && typeof b === 'object' && whole(b.x, -1e7, 1e7) && whole(b.y, -1e7, 1e7) && whole(b.width, 1, 4096) && whole(b.height, 1, 4096));
+      check(typeof b.src === 'string' && b.src.startsWith('data:image/png;base64,') && /^[A-Za-z0-9+/]+=*$/.test(b.src.slice(22)));
+    }
     check(layer.opacity === undefined || number(layer.opacity, 0, 1)); check(layer.blend === undefined || BLEND_MODES.includes(layer.blend));
     check(layer.groups === undefined || (Array.isArray(layer.groups) && layer.groups.length <= 10000));
     for (const group of layer.groups ?? []) { check(group && typeof group === 'object'); id(group.id); check(typeof group.name === 'string' && group.name.length <= 200); }

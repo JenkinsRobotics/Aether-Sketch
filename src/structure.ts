@@ -68,10 +68,11 @@ export function duplicateLayer(doc: SketchDocument, id: string, nextID: () => st
     paths: source.paths.map(p => ({ ...p, id: ids.get(p.id)!, groupID: p.groupID && ids.get(p.groupID) })) };
   return { ...doc, layers: [...doc.layers.slice(0, index), copy, ...doc.layers.slice(index)] };
 }
-/** Whether a layer can merge into the one below: both unlocked and the upper layer blends normally. */
+/** Whether a layer can merge into the one below: both unlocked vector layers and the upper layer blends normally.
+ * ponytail: pixel layers do not merge yet; composite the bitmaps (and rasterise vectors) when that is needed. */
 export const canMergeDown = (doc: SketchDocument, id: string) => {
   const index = doc.layers.findIndex(l => l.id === id), upper = doc.layers[index], lower = doc.layers[index + 1];
-  return !!upper && !!lower && !upper.locked && !lower.locked && (upper.blend ?? 'normal') === 'normal';
+  return !!upper && !!lower && !upper.locked && !lower.locked && (upper.blend ?? 'normal') === 'normal' && upper.kind !== 'pixel' && lower.kind !== 'pixel';
 };
 /** Merge a layer into the one below. The upper layer's opacity is kept by folding it into its paths. */
 export function mergeDown(doc: SketchDocument, id: string): SketchDocument {

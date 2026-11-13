@@ -71,7 +71,7 @@ export function inspectDrawing(doc:SketchDocument,args:Args={}) {
   const offset=finite(args.offset,0,0,100000),limit=finite(args.limit,25,1,50);
   if(!Number.isInteger(offset)||!Number.isInteger(limit))throw Error('Use whole-number pagination.');
   const paths=doc.layers.flatMap(l=>l.paths.map(p=>({layer_id:l.id,id:p.id,name:p.name,locked:l.locked||pathLocked(l,p),visible:l.visible&&pathVisible(l,p),bounds:pathBounds([p]),fill:p.fill,stroke:p.color,stroke_width_px:p.widthPx,closed:p.closed,text:p.text?.content})));
-  return {width_px:doc.widthPx,height_px:doc.heightPx,layers:doc.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,locked:l.locked,shape_count:l.paths.length})),total_shapes:paths.length,offset,shapes:paths.slice(offset,offset+limit),next_offset:offset+limit<paths.length?offset+limit:null};
+  return {width_px:doc.widthPx,height_px:doc.heightPx,layers:doc.layers.map(l=>({id:l.id,name:l.name,visible:l.visible,locked:l.locked,kind:l.kind??'vector',shape_count:l.paths.length})),total_shapes:paths.length,offset,shapes:paths.slice(offset,offset+limit),next_offset:offset+limit<paths.length?offset+limit:null};
 }
 /** Pure document operation. The editor commits this validated candidate once. */
 export function prepareDrawingEdit(doc:SketchDocument,name:string,args:Args):{document:SketchDocument;ids:string[];layerID:string} {
@@ -84,6 +84,7 @@ export function prepareDrawingEdit(doc:SketchDocument,name:string,args:Args):{do
   }
   const l=next.layers.find(l=>l.id===args.layer_id);
   if(!l||l.locked||!l.visible)throw Error('Select an existing visible, unlocked layer.');
+  if(l.kind==='pixel')throw Error('This is a pixel layer. Shapes need a vector layer: create one with add_layer.');
   if(name==='aether_sketch_draw') {
     if(!Array.isArray(args.shapes)||!args.shapes.length||args.shapes.length>100)throw Error('Draw 1–100 shapes per step.');
     const created=args.shapes.map(shape);l.paths.push(...created);ids=created.map(p=>p.id);

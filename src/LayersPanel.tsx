@@ -2,7 +2,7 @@ import { memo, useState } from 'react';
 import { AetherIcon, IconButton, LayerStack, TreePanel, type TreeNode } from '@aether/ui';
 import { pathBounds, pathData } from '@aether/sketch';
 import { ancestors, canMergeDown, duplicateLayer, groupPaths, mergeDown, pathLocked, pathVisible, moveTreeItem } from './structure';
-import { newLayer, type SketchDocument, type Layer } from './document';
+import { newLayer, newPixelLayer, type SketchDocument, type Layer } from './document';
 import type { BoardItem } from './board';
 
 /** Tree id of the Board section: notes, text boxes, tables and media beside the drawing. */
@@ -17,6 +17,7 @@ const boardLabel = (item: BoardItem) => {
 const VIEW_KEY = 'aether-sketch.layer-view';
 /** A layer's content drawn small, for the preview list. */
 const LayerThumbnail = memo(function LayerThumbnail({ layer }: { layer: Layer }) {
+  if (layer.kind === 'pixel') return layer.pixels ? <svg viewBox={`0 0 ${layer.pixels.width} ${layer.pixels.height}`} preserveAspectRatio="xMidYMid meet"><image href={layer.pixels.src} width={layer.pixels.width} height={layer.pixels.height} /></svg> : <svg viewBox="0 0 4 3" />;
   const shown = layer.paths.filter(p => pathVisible({ ...layer, visible: true }, p) && !p.text), b = pathBounds(shown);
   if (!b) return <svg viewBox="0 0 4 3" />;
   const pad = Math.max(b.width, b.height) * .06 || 1;
@@ -26,8 +27,9 @@ const LayerThumbnail = memo(function LayerThumbnail({ layer }: { layer: Layer })
   </svg>;
 });
 
-export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard }: {
-  doc: SketchDocument; layer: Layer; selected: string[]; onSelect: (layerID: string, ids: string[]) => void;
+export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard, pixel = false }: {
+  /** New layers are pixel layers (the Pixel workspace) instead of vector layers. */
+  pixel?: boolean; doc: SketchDocument; layer: Layer; selected: string[]; onSelect: (layerID: string, ids: string[]) => void;
   commit: (change: (doc: SketchDocument) => SketchDocument) => void;
   boardSelection?: readonly string[]; onSelectBoard?: (ids: string[]) => void; onDeleteBoard?: (ids: string[]) => void;
 }) {
@@ -73,7 +75,7 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     const rank = (id: string) => Math.max(-1, ...l.paths.map((p, i) => p.id === id || ancestors(l, p.groupID).some(g => g.id === id) ? i : -1));
     return rank(b.id) - rank(a.id);
   });
-  const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: <AetherIcon name="layers" />, badge: String(l.paths.length), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
+  const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: <AetherIcon name={l.kind === 'pixel' ? 'image' : 'layers'} />, badge: l.kind === 'pixel' ? 'px' : String(l.paths.length), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
   // Board items draw above every layer, so their section leads the tree, newest first.
   if (board.length) nodes.unshift({ id: BOARD_NODE, label: 'Board', icon: <AetherIcon name="notes" />, badge: String(board.length),
     children: [...board].reverse().map(item => ({ id: item.id, label: boardLabel(item), icon: <AetherIcon name={BOARD_ICON[item.kind] ?? 'rectangle'} /> })) });
@@ -84,13 +86,13 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
   const current = boardSelection.length ? boardSelection[0] : treeMatches ? treeSelection : selected[0] ?? layer.id;
   const highlighted = new Set(boardSelection.length ? boardSelection : selected.length ? selected : [layer.id]);
   if (treeMatches) highlighted.add(treeSelection);
-  const newLayerControl = { id: 'add', label: 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = newLayer(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } };
+  const newLayerControl = { id: 'add', label: pixel ? 'New pixel layer' : 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = (pixel ? newPixelLayer : newLayer)(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } };
   if (view === 'previews') return <LayerStack ariaLabel="Drawing layers" selectedID={layer.id} footer={footer} controls={[newLayerControl,
       { id: 'duplicate', label: 'Duplicate layer', icon: <AetherIcon name="duplicate" />, onClick: () => command(layer.id, 'duplicate') },
       { id: 'merge', label: 'Merge down', icon: <AetherIcon name="merge" />, disabled: !canMergeDown(doc, layer.id), onClick: () => command(layer.id, 'merge-down') },
       { id: 'delete', label: 'Delete layer', icon: <AetherIcon name="delete" />, disabled: doc.layers.length <= 1 || layer.locked, onClick: () => command(layer.id, 'delete') }]}
     layers={doc.layers.map(l => ({ id: l.id, label: l.name, visible: l.visible, locked: l.locked, thumbnail: <LayerThumbnail layer={l} />,
-      detail: [l.blend && l.blend !== 'normal' ? l.blend.replace('-', ' ') : '', (l.opacity ?? 1) < 1 ? `${Math.round((l.opacity ?? 1) * 100)}%` : '', `${l.paths.length} item${l.paths.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }))}
+      detail: [l.blend && l.blend !== 'normal' ? l.blend.replace('-', ' ') : '', (l.opacity ?? 1) < 1 ? `${Math.round((l.opacity ?? 1) * 100)}%` : '', l.kind === 'pixel' ? 'Pixels' : `${l.paths.length} item${l.paths.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }))}
     onSelect={id => onSelect(id, [])} onToggleVisible={id => command(id, 'visibility')} onToggleLock={id => command(id, 'lock')}
     onMove={(source, target, position) => commit(d => moveTreeItem(d, source, target, position))} />;
   return <TreePanel title="Layers" ariaLabel="Drawing layers" footer={footer} nodes={nodes} selectedIDs={highlighted}

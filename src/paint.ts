@@ -2,6 +2,7 @@ import { textSVG } from './text';
 import { gradientVector, pathBounds, pathData, strokeDash, transformPath } from '@aether/sketch';
 import { ancestors, pathLocked, pathVisible } from './structure';
 import type { DrawingPath, Layer, SketchDocument } from './document';
+import { pixelBounds, unionRect } from './pixels';
 export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash'] as const;
 export type PaintStyle = Pick<DrawingPath, typeof paintKeys[number]>;
 export const defaultPaint: PaintStyle = { color: '#2368ce', fill: '#bcd4f5', widthPx: 3, opacity: 1, fillOpacity: 1, strokeOpacity: 1, strokeEnabled: true, lineCap: 'round', lineJoin: 'round', dash: 'solid' };
@@ -64,7 +65,7 @@ const attributeNames: Record<string, string> = { fillRule: 'fill-rule', fillOpac
 const xmlText = (value: string) => value.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 /** What an export frames: the artboard, or for an infinite drawing everything drawn, with a small margin. */
 export function exportArea(doc: SketchDocument) {
-  const drawn = doc.infinite ? pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p)))) : null;
+  const drawn = doc.infinite ? unionRect(pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p)))), pixelBounds(doc.layers)) : null;
   if (!drawn) return { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
   const margin = Math.max(drawn.width, drawn.height) * .02, x = drawn.x - margin, y = drawn.y - margin;
   return { x, y, width: Math.max(drawn.width + margin * 2, 1e-6), height: Math.max(drawn.height + margin * 2, 1e-6) };
@@ -92,8 +93,9 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string 
       const attrs = Object.entries(paintAttributes(p, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
       return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attrs) : `<path d="${pathData(p)}" ${attrs}/>`));
     }).join('');
+    const b = l.pixels, bitmap = b ? `<image href="${b.src}" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" preserveAspectRatio="none"/>` : '';
     const style = [l.visible ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');
-    return `<g id="layer${index + 1}" inkscape:groupmode="layer" inkscape:label="${xmlText(l.name)}"${style ? ` style="${style}"` : ''}>${markup}</g>`;
+    return `<g id="layer${index + 1}" inkscape:groupmode="layer" inkscape:label="${xmlText(l.name)}"${style ? ` style="${style}"` : ''}>${bitmap}${markup}</g>`;
   }).join('');
   const n = (v: number) => +v.toPrecision(10);
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${n(area.width)}" height="${n(area.height)}" viewBox="${n(area.x)} ${n(area.y)} ${n(area.width)} ${n(area.height)}"><defs>${defs}</defs>${body}</svg>`;
