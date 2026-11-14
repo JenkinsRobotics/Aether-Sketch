@@ -17,10 +17,11 @@ import { brushOpacity, brushOutline, dabsTo, eraseWith, newDabState, type BrushS
 import { DabStroke, SmudgeStroke, IDENTITY, fitMatrix, liftPixels, moveMatrix, rotateMatrix, skewMatrix, type Matrix, type PixelSelection, type Rect, type SelectMode } from './pixels';
 import type { PixelBitmap } from './document';
 import { steadyPoint, strokeConstraint, symmetryMaps, type Guides } from './guides';
+import { predictStroke } from './predict';
 import { GuideOverlay, moveGuide } from './GuideOverlay';
 import { joinOpenPath } from './join';
 import { cornerIndices, drawnParts, roundCorners, type CornerStyle } from './vector';
-import type { SketchPath } from '@aether/sketch';
+import { ellipsePath, type SketchPath } from '@aether/sketch';
 export type EditorTool = SketchTool | 'text' | 'trim' | 'fill' | 'eyedropper' | 'brush' | 'eraser' | 'smudge' | 'star' | 'lasso' | 'hand' | 'zoom'
   | 'marquee' | 'marquee-ellipse' | 'marquee-lasso' | 'marquee-polygon' | 'wand' | 'transform' | 'corner' | 'shape' | 'knife';
 /** A star from a regular polygon's corners: an inner point between each pair, at half the outer radius. */
@@ -140,6 +141,22 @@ export function SketchCanvas(props: Props) {
     const followed = s.follow ? s.follow(at) : at, steadied = props.drawGuides.steady ? steadyPoint(s.last, followed, props.drawGuides.steady) : followed;
     s.last = steadied; return steadied;
   };
+  /** Predictive stroke: the finished stroke as the clean shape it resembles. A stroke a guide already steered is left alone. */
+  const predicted = (points: Point[]) => props.drawGuides.predict && !stroke.current?.follow ? predictStroke(points) : null;
+  /** The tidied stroke as brush samples: evenly spaced and at one pressure, so its width is even all along. */
+  const tidySamples = (samples: BrushSample[]): BrushSample[] | null => {
+    const shape = predicted(samples.map(s => s.point)); if (!shape) return null;
+    const pressure = samples.reduce((n, s) => n + s.pressure, 0) / samples.length, t0 = samples[0].timeMs, span = Math.max(1, samples[samples.length - 1].timeMs - t0);
+    const lengths = shape.points.map((p, i) => i ? Math.hypot(p[0] - shape.points[i - 1][0], p[1] - shape.points[i - 1][1]) : 0), total = lengths.reduce((a, b) => a + b, 0) || 1, step = Math.max(2 / scale(), total / 400);
+    const out: BrushSample[] = []; let run = 0;
+    shape.points.forEach((p, i) => {
+      // Long straight runs get points in between, so a line is more than its two ends.
+      const a = shape.points[i - 1], pieces = i ? Math.max(1, Math.ceil(lengths[i] / step)) : 1;
+      for (let k = 1; k <= pieces; k++) { const t = k / pieces, at = run + lengths[i] * t; out.push({ point: i ? [a[0] + (p[0] - a[0]) * t, a[1] + (p[1] - a[1]) * t] : p, pressure, timeMs: t0 + span * at / total }); }
+      run += lengths[i];
+    });
+    return out;
+  };
   const sample = (e: { pressure: number; timeStamp: number }, at: Point) => stroke.current?.samples.push({ point: guided(at), pressure: e.pressure || .5, timeMs: e.timeStamp });
   const strokeOutline = () => stroke.current ? brushOutline(stroke.current.samples, { sizePx: (props.tool === 'eraser' ? props.brush.eraserPx : props.brush.style.sizePx) / scale(), taper: props.tool === 'brush' && props.brush.style.taper, minSize: props.tool === 'eraser' ? 1 : props.brush.style.minSize, pen: stroke.current.pen }) : [];
   const box = useRef<{ origin: Point; previous: string[] } | null>(null);
@@ -201,7 +218,11 @@ export function SketchCanvas(props: Props) {
     if (guideHandle) { guideDrag.current = guideHandle; return; }
     if (!canEdit) return;
     const at = point(e), target = e.target as SVGElement;
-    if (props.tool === 'brush' || props.tool === 'eraser' || props.tool === 'paint') stroke.current = { samples: [], pen: e.pointerType === 'pen', start: at, last: at };
+    if (props.tool === 'brush' || props.tool === 'eraser' || props.tool === 'paint') {
+      stroke.current = { samples: [], pen: e.pointerType === 'pen', start: at, last: at };
+      // A stroke that starts beside a ruler, ellipse or French curve is on it from its first point. (Directions are chosen once it moves.)
+      const hold = strokeConstraint(props.drawGuides, at, at, 24 / scale()); if (hold) stroke.current.follow = hold;
+    }
     if (props.tool === 'brush' || props.tool === 'eraser') { sample(e, at); if (props.tool === 'brush' && props.pixelBrush) { startDabs(); feedDabs(); } updateDraft(beginDraft('paint', at, false, options())); return; }
     if (props.tool === 'smudge') { startSmudge(at); return; }
     if (props.tool === 'text') {
@@ -254,7 +275,9 @@ export function SketchCanvas(props: Props) {
     } else {
       const engine = ENGINE_TOOL[props.tool] ?? props.tool as SketchTool;
       if (selecting && !draftRef.current) { selectMode.current = modeOf(e); heldShift.current = e.shiftKey; }
-      const start = selecting ? at : snap(at, e.altKey);
+      const start = selecting ? at : stroke.current?.follow ? stroke.current.follow(at) : snap(at, e.altKey);
+      // Guides steer from where the stroke really starts, which snapping may have moved.
+      if (stroke.current) stroke.current.start = stroke.current.last = start;
       updateDraft(engine === 'pen' ? { ...penPointerDown(draftRef.current, start, options().closeTolerance, options()), penPress: at } : beginDraft(engine, start, constrained(e), options()));
     }
   };
@@ -326,11 +349,14 @@ export function SketchCanvas(props: Props) {
       drag.current = null; setPreview([]);
     }
     else if (draftRef.current && stroke.current && dab.current) {
+      // Predictive stroke: the live paint is thrown away and the tidied stroke is stamped in its place.
+      const tidy = tidySamples(stroke.current.samples); if (tidy) { dab.current.el.remove(); stroke.current.samples = tidy; startDabs(); }
       feedDabs(); const { stroke: painted, el } = dab.current; dab.current = null; stroke.current = null; updateDraft(null);
       // The stroke canvas stays in view until the layer's bitmap holds it.
       if (painted.rect) void props.onPaintStroke(painted.canvas, painted.rect, props.brush.style.opacity, painted.clipped).finally(() => el.remove()); else el.remove();
     }
     else if (draftRef.current && stroke.current && brushing) {
+      const tidy = props.tool === 'brush' ? tidySamples(stroke.current.samples) : null; if (tidy) stroke.current.samples = tidy;
       const outline = strokeOutline(), samples = stroke.current.samples, style = props.brush.style; stroke.current = null; updateDraft(null);
       if (props.tool === 'brush' && outline.length > 2) {
         const path: DrawingPath = { ...props.paint, id: crypto.randomUUID(), name: 'Brush stroke', points: outline, closed: true, fill: props.paint.color, fillGradient: undefined, fillOpacity: 1, strokeEnabled: false,
@@ -341,7 +367,10 @@ export function SketchCanvas(props: Props) {
     }
     else if (draftRef.current) {
       const d = draftRef.current, raw = point(e), at = selecting || d.tool === 'paint' || d.tool === 'freehand' || (d.tool === 'pen' && d.penAnchor !== undefined) ? raw : snap(raw, e.altKey);
-      settle(endDraft(d, stroke.current && d.tool === 'paint' ? guided(at) : at, constrained(e))); stroke.current = null;
+      const end = stroke.current && d.tool === 'paint' ? guided(at) : at, tidy = d.tool === 'paint' ? predicted([...d.points, end]) : null;
+      // A predicted ellipse is a true four-node ellipse; other shapes keep the corners or the arc the predictor found.
+      const oval = tidy?.box && ellipsePath([tidy.box.x, tidy.box.y], [tidy.box.x + tidy.box.width, tidy.box.y + tidy.box.height]);
+      settle(oval ? { kind: 'commit', shape: oval.points, curves: oval.curves, nodeModes: oval.nodeModes, closed: true } : tidy ? { kind: 'commit', shape: tidy.closed ? tidy.points.slice(0, -1) : tidy.points, closed: tidy.closed } : endDraft(d, end, constrained(e))); stroke.current = null;
     }
     setGuides([]); activePointer.current = null; e.currentTarget.releasePointerCapture(e.pointerId);
   };

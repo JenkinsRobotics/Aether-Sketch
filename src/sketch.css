@@ -66,7 +66,7 @@ html, body, #root { height: 100%; margin: 0; }
 .sketch-eraser-preview { fill: var(--aether-color-accent); fill-opacity: .25; stroke: var(--aether-color-accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .sketch-layer-settings { display: grid; gap: 8px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--aether-color-border); }
 /* Drawing guides: thin accent lines, round handles that drag. Lines ignore the pointer so strokes pass through them. */
-.sketch-guides line, .sketch-guides ellipse { stroke: var(--aether-color-accent); stroke-width: 1; stroke-dasharray: 6 4; fill: none; pointer-events: none; }
+.sketch-guides line, .sketch-guides ellipse, .sketch-guides path { stroke: var(--aether-color-accent); stroke-width: 1; stroke-dasharray: 6 4; fill: none; pointer-events: none; }
 .sketch-guides .sketch-guide-fan { stroke-opacity: .25; stroke-dasharray: none; }
 .sketch-guide-handle { fill: var(--aether-color-bg-panel, #fff); stroke: var(--aether-color-accent); stroke-width: 2; cursor: move; }
 .sketch-guide-handle:hover { fill: var(--aether-color-accent); }

@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.26)
+## Where it stands (alpha-0.1.27)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -22,8 +22,8 @@ and eyedropper follow the current layer's kind.
 
 | | Pixel | Vector |
 |---|---|---|
-| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse, symmetry (mirror, flip, quad, radial), 1- and 2-point perspective, steady stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
-| Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No layer effects, symbols or multiple artboards. No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
+| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse and French curve guides, symmetry (mirror, flip, quad, radial), 1-, 2- and 3-point and fisheye perspective, isometric grid, steady stroke, predictive stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
+| Known gap | No canvas rotation, no pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No symbols or multiple artboards. No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
 
 Pixel layer limits in this release:
 
@@ -84,8 +84,16 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
    later: curves and levels, more effects (stroke, inner shadow), an adjustment
    limited by its own mask, and clips, masks and effects on a stroke while it is
    still being painted. (Fresco and Affinity masks, Affinity adjustments.)
-6. **Guides.** French curve, 3-point and fisheye perspective, predictive stroke,
-   canvas rotation, isometric grids.
+6. **Guides.** Done in alpha-0.1.27, except canvas rotation: a French curve
+   template (move, turn, resize, flip; strokes started on its edge follow it),
+   3-point and fisheye (5-point) perspective, an isometric grid whose three axes
+   steer strokes, and predictive stroke (a finished pencil or brush stroke that
+   looks like a line, arc, circle, ellipse, triangle or box becomes that shape).
+   A stroke that starts beside the ruler, ellipse or French curve is now on it
+   from its first point. Left for later: **canvas rotation**, which needs a
+   rotation added to the shared FreeformCanvas camera in Aether UI; more French
+   curve templates; tilted ellipses in predictive stroke. (SketchBook guides and
+   Predictive Stroke.)
 7. **Document.** Multiple artboards, symbols, PSD import and export.
 8. **Motion.** Flipbook frames and time-lapse recording. Last, because nothing
    else depends on it.

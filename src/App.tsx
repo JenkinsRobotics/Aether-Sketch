@@ -97,10 +97,12 @@ function initialWorkspace(): Workspace {
   return 'pixel';
 }
 const workspaceTools = (w: Workspace) => new Set(TOOL_TABS.filter(t => WORKSPACES[w].tabs.includes(t.id)).flatMap(t => t.groups.flatMap(g => g.tools)));
-const GUIDES: { id: 'ruler' | 'ellipse' | 'symmetry' | 'perspective' | 'steady'; label: string; icon: ReactNode }[] = [
+const GUIDES: { id: 'ruler' | 'ellipse' | 'curve' | 'symmetry' | 'perspective' | 'isometric' | 'steady' | 'predict'; label: string; icon: ReactNode }[] = [
   { id: 'ruler', label: 'Ruler', icon: <AetherIcon name="ruler" /> }, { id: 'ellipse', label: 'Ellipse guide', icon: <AetherIcon name="circle-dashed" /> },
+  { id: 'curve', label: 'French curve', icon: <AetherIcon name="curve" /> },
   { id: 'symmetry', label: 'Symmetry', icon: <ToolIcon name="mirror" /> }, { id: 'perspective', label: 'Perspective guide', icon: <AetherIcon name="grid-cross" /> },
-  { id: 'steady', label: 'Steady stroke', icon: <AetherIcon name="scribble-variable" /> },
+  { id: 'isometric', label: 'Isometric grid', icon: <AetherIcon name="cube" /> },
+  { id: 'steady', label: 'Steady stroke', icon: <AetherIcon name="scribble-variable" /> }, { id: 'predict', label: 'Predictive stroke', icon: <AetherIcon name="scribble" /> },
 ];
 const DRAW_TOOLS = [...new Set(TOOL_TABS.flatMap(t => t.groups.flatMap(g => g.tools)))];
 type BoardTool = 'note' | 'textbox' | 'table' | 'connector';
@@ -349,8 +351,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       : id === 'ellipse' ? { ...g, ellipse: g.ellipse ? undefined : { center: [cx, cy], rx: 160 * u, ry: 90 * u, angle: 0 } }
       : id === 'symmetry' ? { ...g, symmetry: g.symmetry ? undefined : { mode: 'vertical', center: [cx, cy], sections: 6 } }
       : id === 'perspective' ? { ...g, perspective: g.perspective ? undefined : { points: [[cx, cy - 120 * u]] } }
+      : id === 'curve' ? { ...g, curve: g.curve ? undefined : { center: [cx, cy], size: 200 * u, angle: 0 } }
+      : id === 'isometric' ? { ...g, isometric: g.isometric ? undefined : { origin: [cx, cy], size: 40 * u } }
+      : id === 'predict' ? { ...g, predict: g.predict ? undefined : true }
       : { ...g, steady: g.steady === undefined ? .5 : undefined });
-    if (id !== 'steady' && !isBoardTool(tool) && !['brush', 'paint', 'eraser'].includes(tool)) chooseTool('brush');
+    if (id !== 'steady' && id !== 'predict' && !isBoardTool(tool) && !['brush', 'paint', 'eraser'].includes(tool)) chooseTool('brush');
   };
   /** The palette sets the drawing colour and recolours the selection: brush strokes by fill, lines by stroke. */
   const pickColour = (hex: string) => {
