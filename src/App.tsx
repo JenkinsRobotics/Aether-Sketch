@@ -16,7 +16,7 @@ import { importSVG } from './svg-import';
 import { saveRecovery, type Recovery } from './recovery';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
-import { DriveBrowser, DocumentTabBrowser, FileIcon, StandardAppShell, FreeformCanvas, type FreeformCamera, type FreeformCanvasController, type FreeformChange, type FreeformItem, type FreeformPoint, type WorkspacePanelState } from '@aether/ui';
+import { DriveBrowser, DocumentTabBrowser, FileIcon, StandardAppShell, FreeformCanvas, screenToWorld, type FreeformCamera, type FreeformCanvasController, type FreeformChange, type FreeformItem, type FreeformPoint, type WorkspacePanelState } from '@aether/ui';
 import { pathBounds } from '@aether/sketch';
 import { alignPaths, distributePaths, flipPaths, orderPaths, rotatePaths, type AlignMode, type OrderMode } from './arrange';
 import { BoardInspector } from './BoardInspector';
@@ -344,7 +344,10 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (next === 'transform' && !selectionRef.current) { if (layer.pixels) void selectPainted(); else setNotice('Move and transform work on a painted pixel layer. Select one in Layers.'); }
   };
   /** Where a new guide appears: the middle of the view. */
-  const viewCentre = (): [number, number] => { const box = document.querySelector('[aria-label="Sketch board"]')?.getBoundingClientRect(); return [((box?.width ?? 800) / 2 - camera.x) / camera.zoom, ((box?.height ?? 600) / 2 - camera.y) / camera.zoom]; };
+  const viewCentre = (): [number, number] => { const box = document.querySelector('[aria-label="Sketch board"]')?.getBoundingClientRect(), at = screenToWorld(camera, { x: (box?.width ?? 800) / 2, y: (box?.height ?? 600) / 2 }); return [at.x, at.y]; };
+  /** Turn the canvas (not the drawing) in 15° steps, landing on whole steps after a free Alt+scroll turn. Nothing in the file changes. */
+  const turnCanvas = (steps: number) => { const step = Math.PI / 12, now = (camera.rotation ?? 0) / step; canvasController.current?.rotateTo(steps === 0 ? 0 : (steps > 0 ? Math.floor(now + 1e-6) + steps : Math.ceil(now - 1e-6) + steps) * step); };
+  const turnedDeg = Math.round((camera.rotation ?? 0) * 180 / Math.PI);
   const toggleGuide = (id: string) => {
     const [cx, cy] = viewCentre(), u = 1 / camera.zoom;
     setGuides(g => id === 'ruler' ? { ...g, ruler: g.ruler ? undefined : { a: [cx - 220 * u, cy], b: [cx + 220 * u, cy] } }
@@ -422,6 +425,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (id === 'image') { imageFile.current?.click(); return; }
     if (id === 'fit') { canvasController.current?.fit(); return; }
     if (id === 'zoom-100') { canvasController.current?.zoomTo(1); return; }
+    if (id === 'rotate-left' || id === 'rotate-right' || id === 'rotate-reset') { turnCanvas(id === 'rotate-left' ? -1 : id === 'rotate-right' ? 1 : 0); return; }
     if (disabled) return;
     const align = ALIGN.find(a => `align-${a.id}` === id), order = ORDER.find(o => `order-${o.id}` === id);
     if (align) replace(alignPaths(chosen, align.id, doc.infinite ? pathBounds(chosen) ?? artboard : artboard));
@@ -456,6 +460,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'select-all', label: 'Select all pixels on this layer', category: 'Select' }, { id: 'select-none', label: 'Deselect pixels', category: 'Select', disabled: !selection },
     { id: 'select-invert', label: 'Invert pixel selection', category: 'Select', disabled: !selection }, { id: 'select-mask', label: 'Mask the layer outside the selection', category: 'Select', disabled: !selection }, { id: 'select-clear', label: 'Clear selected pixels', category: 'Select', disabled: !selection },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
+    { id: 'rotate-left', label: 'Rotate canvas left 15°', category: 'View' }, { id: 'rotate-right', label: 'Rotate canvas right 15°', category: 'View' }, { id: 'rotate-reset', label: 'Reset canvas rotation', category: 'View', disabled: !camera.rotation },
     { id: 'save', label: 'Save drawing', category: 'File' }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, category: 'File' })), ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
     { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
@@ -506,7 +511,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     }} />
     <input hidden ref={imageFile} type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.txt,.csv" aria-label="Add image or file to the board" onChange={e => {
       const input = e.currentTarget, files = [...(input.files ?? [])]; input.value = '';
-      if (files.length) { const at = { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom }; void attach(files, at); }
+      if (files.length) { const at = screenToWorld(camera, { x: 160, y: 160 }); void attach(files, at); }
     }} />
     <SaveRecoveryPanel controller={persistence.guard} loading={!persistence.ready} error={persistence.state.message}/>
     <StandardAppShell className="sketch-app" application={{ apps: applications, id: "sketch", name: "Aether Sketch" }} documentName={`${name}.aethersketch`}
@@ -566,7 +571,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       connection={documentConnection} historyTabStorageKey="aether-sketch.history-tab" history={<SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/>}
       files={{ local: { label: 'This drawing', icon: <AetherIcon name="file-sketch" />, content: <DocumentTabBrowser title="Drawing contents" rootLabel={`${name}.aethersketch`} label="Drawing"
           tabs={[{ id: 'drawing', label: name, detail: `Aether Sketch · ${doc.layers.length} layer${doc.layers.length === 1 ? '' : 's'}${board.length ? ` · ${board.length} board item${board.length === 1 ? '' : 's'}` : ''}`, icon: <AetherIcon name="file-sketch" />, current: true }]}
-          onAdd={newDrawing} onReorder={() => {}} onDetach={() => {}} /> }, drive, onFiles: files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom }) }}
+          onAdd={newDrawing} onReorder={() => {}} onDetach={() => {}} /> }, drive, onFiles: files => void attach(files, screenToWorld(camera, { x: 160, y: 160 })) }}
       objectTabs={{
         inspector: <SelectionInspector paths={chosen} board={chosenBoard} layer={layer} />,
         properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
@@ -618,14 +623,16 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         actions: [{ id: 'board', label: 'Board: notes, text boxes, tables, connectors, images', icon: <AetherIcon name="notes" />, pressed: isBoardTool(tool),
             items: [...boardTools.map(t => ({ id: t.id, label: t.label, icon: t.icon })), { id: 'image', label: 'Image or file…', icon: <AetherIcon name="image" /> }] },
           { id: 'fit', label: 'Zoom to fit', icon: <AetherIcon name="fit" /> }, { id: 'zoom-100', label: 'Zoom to 100%', icon: <AetherIcon name="zoom-in" /> },
+          { id: 'rotate', label: turnedDeg ? `Rotate canvas (now ${turnedDeg}°)` : 'Rotate canvas (or Alt+scroll)', icon: <AetherIcon name="rotate" />, pressed: !!camera.rotation,
+            items: [{ id: 'rotate-left', label: 'Turn left 15°' }, { id: 'rotate-right', label: 'Turn right 15°' }, { id: 'rotate-reset', label: 'Reset rotation', disabled: !camera.rotation }] },
           { id: 'grid', label: 'Dot grid', icon: <AetherIcon name="grid-dots" />, pressed: boardGrid }, { id: 'connectors', label: 'Show connectors', icon: <ToolIcon name="connector" />, pressed: boardConnectors },
           { id: 'snap', label: 'Snapping', icon: <AetherIcon name="timeline-snap" />, pressed: snap.enabled },
           { id: 'artboard', label: 'Artboard', icon: <AetherIcon name="rectangle-dashed" />, pressed: !doc.infinite }] }}>
       <div className="sketch-board" onKeyDown={boardKeys}>
-        <FreeformCanvas aria-label="Sketch board" hud={false} zoomLimits={ZOOM_LIMITS} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
+        <FreeformCanvas aria-label="Sketch board" rotatable hud={false} zoomLimits={ZOOM_LIMITS} showGrid={boardGrid} showConnectors={boardConnectors} items={board} onChange={changeBoard} camera={camera} onCameraChange={setCamera}
           selection={boardSelection} onSelectionChange={selectBoard} onUndo={undo} onRedo={redo} tools={[]} controllerRef={canvasController}
           tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' || tool === 'hand' || tool === 'zoom' ? tool : `vector:${tool}`} hostTools={HOST_TOOLS}
-          onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, { x: (-camera.x + 160) / camera.zoom, y: (-camera.y + 160) / camera.zoom })}
+          onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, screenToWorld(camera, { x: 160, y: 160 }))}
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
           layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}

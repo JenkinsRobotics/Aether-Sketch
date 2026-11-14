@@ -167,7 +167,8 @@ export function SketchCanvas(props: Props) {
   const point = (e: { clientX: number; clientY: number }): Point => {
     const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.current!.getScreenCTM()!.inverse()); return [p.x, p.y];
   };
-  const scale = () => Math.abs(svg.current?.getScreenCTM()?.a ?? 1);
+  // Screen pixels per drawing unit, whichever way the canvas is turned.
+  const scale = () => { const m = svg.current?.getScreenCTM(); return m ? Math.hypot(m.a, m.b) || 1 : 1; };
   const options = (): ToolOptions => ({ coordinateStep: 0, minimumArea: 1, curveTolerance: .25 / scale(), freehandTolerance: 1 / scale(), closeTolerance: 9 / scale(), dragThreshold: 2 / scale(), polygonSides: props.polygonSides, curvedPrimitives: true, closePenOnFinish: false });
   const paths = props.layer?.paths ?? [], editable = paths.filter(p => props.layer && pathVisible(props.layer, p) && !pathLocked(props.layer, p)), selectedPaths = paths.some(p => props.selected.includes(p.id) && props.layer && (pathLocked(props.layer, p) || !pathVisible(props.layer, p))) ? [] : editable.filter(p => props.selected.includes(p.id));
   const shown = preview.length ? preview : selectedPaths, selectedObject = shown.length === 1 ? shown[0] : undefined;
