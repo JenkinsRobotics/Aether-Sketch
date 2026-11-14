@@ -20,7 +20,7 @@ const VIEW_KEY = 'aether-sketch.layer-view';
 /** A layer's content drawn small, for the preview list. */
 const LayerThumbnail = memo(function LayerThumbnail({ layer }: { layer: Layer }) {
   if (layer.kind === 'pixel') return layer.pixels ? <svg viewBox={`0 0 ${layer.pixels.width} ${layer.pixels.height}`} preserveAspectRatio="xMidYMid meet"><image href={layer.pixels.src} width={layer.pixels.width} height={layer.pixels.height} /></svg> : <svg viewBox="0 0 4 3" />;
-  const shown = layer.paths.filter(p => pathVisible({ ...layer, visible: true }, p) && !p.text), b = pathBounds(shown);
+  const shown = layer.paths.filter(p => pathVisible({ ...layer, visible: true }, p) && !p.text && !p.symbolID), b = pathBounds(shown);
   if (!b) return <svg viewBox="0 0 4 3" />;
   const pad = Math.max(b.width, b.height) * .06 || 1;
   return <svg viewBox={`${b.x - pad} ${b.y - pad} ${b.width + pad * 2} ${b.height + pad * 2}`} preserveAspectRatio="xMidYMid meet">
@@ -81,7 +81,7 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
   ];
   const children = (l: Layer, parentID?: string): TreeNode[] => [
     ...(l.groups ?? []).filter(g => g.parentID === parentID).map(g => ({ id: g.id, label: g.name, icon: <AetherIcon name="folder" />, children: children(l, g.id), actions: actions(g.name, !g.hidden, !!g.locked) })),
-    ...[...l.paths].reverse().filter(p => p.groupID === parentID).map((p): TreeNode => ({ id: p.id, label: p.name ?? (p.text ? 'Text' : p.subpaths?.length ? 'Compound path' : p.closed ? 'Closed path' : 'Open path'), icon: <AetherIcon name={p.text ? "text" : "spline"} />, dimmed: !pathVisible(l, p), actions: actions(p.name ?? 'path', !p.hidden, !!p.locked) })),
+    ...[...l.paths].reverse().filter(p => p.groupID === parentID).map((p): TreeNode => ({ id: p.id, label: p.name ?? (p.symbolID ? 'Symbol' : p.text ? 'Text' : p.subpaths?.length ? 'Compound path' : p.closed ? 'Closed path' : 'Open path'), icon: <AetherIcon name={p.text ? "text" : "spline"} />, dimmed: !pathVisible(l, p), actions: actions(p.name ?? 'path', !p.hidden, !!p.locked) })),
   ].sort((a, b) => {
     const rank = (id: string) => Math.max(-1, ...l.paths.map((p, i) => p.id === id || ancestors(l, p.groupID).some(g => g.id === id) ? i : -1));
     return rank(b.id) - rank(a.id);

@@ -9,6 +9,8 @@ html, body, #root { height: 100%; margin: 0; }
 /* The vector drawing is FreeformCanvas's world-space layer: one SVG unit per canvas pixel. */
 .sketch-canvas { position: absolute; left: 0; top: 0; overflow: visible; touch-action: none; user-select: none; outline: none; }
 .sketch-artboard { filter: drop-shadow(0 1px 3px rgb(0 0 0 / .18)); }
+.sketch-artboard-name { fill: var(--aether-color-text-muted); font-family: var(--aether-font-family); }
+.sketch-artboard-current { stroke: var(--aether-color-accent); stroke-width: 1.5; }
 .sketch-board-inspector { display: flex; flex-direction: column; gap: 8px; padding: 0 0 10px; margin-bottom: 8px; border-bottom: 1px solid var(--aether-color-border); }
 .sketch-selection, .sketch-draft { stroke: var(--aether-color-accent); stroke-width: 1.5; }
 .sketch-selection { stroke-dasharray: 5 3; }

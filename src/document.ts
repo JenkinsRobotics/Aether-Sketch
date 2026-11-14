@@ -3,7 +3,8 @@ import { readBoard, type BoardItem } from './board';
 import { isVectorGradient, type VectorAppearance, type SketchPath } from '@aether/sketch';
 /** `blurPx` softens a path (airbrush, soft brushes): a Gaussian blur in document units. */
 /** `widthProfile` makes the stroke swell or taper along its length; `dashPx` is a custom dash and gap in pixels (it wins over the named `dash`); `arrowStart` and `arrowEnd` put heads on an open path. */
-export interface DrawingPath extends SketchPath, VectorAppearance { widthProfile?: 'taper-end' | 'taper-start' | 'taper-both' | 'pinch'; dashPx?: [number, number]; arrowStart?: 'arrow' | 'dot' | 'bar'; arrowEnd?: 'arrow' | 'dot' | 'bar'; text?: VectorText; fillOpen?: boolean; blurPx?: number; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
+/** `symbolID` makes the path an instance of a symbol: its four points are the corners the symbol's box is placed on (top-left, top-right, bottom-right, bottom-left), and nothing else of it is drawn. */
+export interface DrawingPath extends SketchPath, VectorAppearance { symbolID?: string; widthProfile?: 'taper-end' | 'taper-start' | 'taper-both' | 'pinch'; dashPx?: [number, number]; arrowStart?: 'arrow' | 'dot' | 'bar'; arrowEnd?: 'arrow' | 'dot' | 'bar'; text?: VectorText; fillOpen?: boolean; blurPx?: number; id: string; name?: string; groupID?: string; hidden?: boolean; locked?: boolean; fill?: string | null; color: string; widthPx: number; opacity: number }
 export interface PathGroup { clipPathID?: string; id: string; name: string; parentID?: string; hidden?: boolean; locked?: boolean }
 /** Layer blend modes: the names CSS, SVG, OpenRaster (as svg:…) and PDF (capitalised) share. */
 export const BLEND_MODES = ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'] as const;
@@ -21,7 +22,27 @@ export interface Adjustment { brightness: number; contrast: number; saturation: 
 export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode; kind?: 'pixel'; pixels?: PixelBitmap; role?: 'clip' | 'mask'; effects?: LayerEffects; adjust?: Adjustment }
 /** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none.
  * `infinite` drawings have no artboard: exports frame whatever is drawn. Older drawings keep their artboard. */
-export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean }
+/** A symbol: a drawing kept once and placed many times. `paths` are in the symbol's own coordinates and the box is their frame. Symbols do not nest. */
+export interface SymbolDef { id: string; name: string; x: number; y: number; width: number; height: number; paths: DrawingPath[] }
+/** A path whose own outline is what is drawn and edited: not text, not a symbol instance. */
+export const isGeometry = (p: DrawingPath) => !p.text && !p.symbolID;
+/** A page of the drawing: a named frame that exports are cut to. Every artboard shows the same layers. */
+export interface Artboard { id: string; name: string; x: number; y: number; width: number; height: number }
+/** `artboards` lists the pages when there are several, or one that is not at the origin; `widthPx` and `heightPx` stay the first one's size. */
+export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean; artboards?: Artboard[]; symbols?: SymbolDef[] }
+/** The drawing's artboards: none on an infinite canvas; otherwise the listed ones, or for a drawing without a list the one page at the origin. */
+export function docArtboards(doc: SketchDocument): Artboard[] {
+  return doc.infinite ? [] : doc.artboards?.length ? doc.artboards : [{ id: 'artboard', name: 'Artboard 1', x: 0, y: 0, width: doc.widthPx, height: doc.heightPx }];
+}
+/** The drawing with these artboards (at least one), on a fixed canvas. */
+export function withArtboards(doc: SketchDocument, artboards: Artboard[]): SketchDocument {
+  return artboards.length ? { ...doc, infinite: false, artboards, widthPx: artboards[0].width, heightPx: artboards[0].height } : doc;
+}
+/** A new artboard the size of `like`, to the right of every other one. */
+export function nextArtboard(doc: SketchDocument, like: Artboard, id: string): Artboard {
+  const all = docArtboards(doc), right = Math.max(like.x + like.width, ...all.map(a => a.x + a.width));
+  return { id, name: `Artboard ${all.length + 1}`, x: right + 80, y: like.y, width: like.width, height: like.height };
+}
 export function newLayer(name: string): Layer { return { id: crypto.randomUUID(), name, visible: true, locked: false, paths: [] }; }
 export function newPixelLayer(name: string): Layer { return { ...newLayer(name), kind: 'pixel' }; }
 export function newDocument(): SketchDocument { return { format: 'aethersketch', version: 2, widthPx: 1200, heightPx: 800, infinite: true, layers: [newLayer('Layer 1')] }; }
@@ -39,6 +60,10 @@ export function readDocument(text: string): SketchDocument {
   check(doc?.format === 'aethersketch' && [1, 2].includes(doc.version) && number(doc.widthPx, 1, 16384) && number(doc.heightPx, 1, 16384));
   check(Array.isArray(doc.layers) && doc.layers.length > 0 && doc.layers.length <= 500);
   check(doc.infinite === undefined || typeof doc.infinite === 'boolean');
+  if (doc.artboards !== undefined) {
+    check(Array.isArray(doc.artboards) && doc.artboards.length >= 1 && doc.artboards.length <= 200);
+    for (const a of doc.artboards) { check(a && typeof a === 'object'); id(a.id); check(typeof a.name === 'string' && a.name.length <= 200 && number(a.x, -1e7, 1e7) && number(a.y, -1e7, 1e7) && number(a.width, 1, 16384) && number(a.height, 1, 16384)); }
+  }
   let vertices = 0;
   const geometry = (p: SketchPath, child = false) => {
     check(p && typeof p === 'object');
@@ -53,7 +78,11 @@ export function readDocument(text: string): SketchDocument {
       p.subpaths.forEach(sub => geometry(sub, true));
     }
   };
-  for (const layer of doc.layers) {
+  // Symbols are checked as layers of their own: the same rules for their paths, which must be plain (no instances inside).
+  const symbols: SymbolDef[] = doc.symbols ?? []; check(Array.isArray(symbols) && symbols.length <= 500);
+  for (const sym of symbols) check(sym && typeof sym === 'object' && typeof sym.id === 'string' && number(sym.x, -1e7, 1e7) && number(sym.y, -1e7, 1e7) && number(sym.width, 1e-6, 1e7) && number(sym.height, 1e-6, 1e7) && Array.isArray(sym.paths) && sym.paths.every((p: DrawingPath) => p && p.symbolID === undefined && p.groupID === undefined));
+  const symbolIDs = new Set(symbols.map(sym => sym.id));
+  for (const layer of [...doc.layers, ...symbols.map(sym => ({ id: sym.id, name: sym.name, visible: true, locked: false, paths: sym.paths }))]) {
     check(layer && typeof layer === 'object'); id(layer.id);
     check(typeof layer.name === 'string' && layer.name.length <= 200 && typeof layer.visible === 'boolean' && typeof layer.locked === 'boolean');
     check(Array.isArray(layer.paths) && layer.paths.length <= 10000);
@@ -89,6 +118,7 @@ export function readDocument(text: string): SketchDocument {
       check(path && typeof path === 'object'); id(path.id);
       geometry(path);
       check(path.groupID === undefined || groups.has(path.groupID));
+      if (path.symbolID !== undefined) check(symbolIDs.has(path.symbolID) && path.points.length === 4 && !path.curves && !path.subpaths && !path.text);
       check(path.name === undefined || (typeof path.name === 'string' && path.name.length <= 200));
       check(path.hidden === undefined || typeof path.hidden === 'boolean'); check(path.locked === undefined || typeof path.locked === 'boolean');
       check(path.fill === undefined || path.fill === null || (typeof path.fill === 'string' && /^#[\da-f]{6}$/i.test(path.fill)));
@@ -116,7 +146,7 @@ export function readDocument(text: string): SketchDocument {
     for (const group of layer.groups ?? []) {
       if (group.clipPathID === undefined) continue;
       const clip = layer.paths.find((p: DrawingPath) => p.id === group.clipPathID);
-      check(clip?.closed && !clip.text && clip.groupID === group.id);
+      check(clip?.closed && !clip.text && !clip.symbolID && clip.groupID === group.id);
     }
   }
   const board = readBoard(doc.board, ids), { board: _raw, ...rest } = doc;

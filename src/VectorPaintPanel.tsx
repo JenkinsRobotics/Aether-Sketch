@@ -34,7 +34,7 @@ export function VectorPaintPanel({ value, disabled, onChange, selected, inside, 
       <SelectField aria-label={key === 'arrowStart' ? 'Arrowhead at start' : 'Arrowhead at end'} value={value[key] ?? 'none'} options={[{ value: 'none', label: 'none' }, ...ARROW_HEADS.map(value => ({ value, label: value }))]}
         onChange={e => onChange({ [key]: e.target.value === 'none' ? undefined : e.target.value })} /></FieldRow>)}
     <FieldRow label="Object opacity"><NumberField aria-label="Object opacity" value={value.opacity * 100} min={0} max={100} unit="%" onCommit={v => onChange({ opacity: v / 100 })} /></FieldRow>
-    <Button active={inside} disabled={!inside && (!selected?.closed || !!selected.text)} onClick={onInside}>{inside ? 'Finish drawing inside' : 'Draw inside selected shape'}</Button>
+    <Button active={inside} disabled={!inside && (!selected?.closed || !!selected.text || !!selected.symbolID)} onClick={onInside}>{inside ? 'Finish drawing inside' : 'Draw inside selected shape'}</Button>
     {canRelease && <Button onClick={onRelease}>Release clipping</Button>}
     {inside && <p>New vector paths are clipped to the selected boundary. The clipping group moves together.</p>}
   </fieldset>;

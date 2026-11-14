@@ -116,7 +116,7 @@ export function eraseWith<P extends SketchPath & { id: string; text?: unknown }>
   if (!area || outline.length < 3) return { ids, next };
   for (const path of paths) {
     const b = pathBounds([path]);
-    if (!path.closed || path.text || !b || b.x > area.x + area.width || area.x > b.x + b.width || b.y > area.y + area.height || area.y > b.y + b.height) continue;
+    if (!path.closed || path.text || (path as { symbolID?: string }).symbolID || !b || b.x > area.x + area.width || area.x > b.x + b.width || b.y > area.y + area.height || area.y > b.y + b.height) continue;
     let cut: SketchPath | null;
     try { cut = booleanPaths([path, eraser], 'difference', tolerance); } catch { continue; } // too detailed: leave it whole
     ids.push(path.id);

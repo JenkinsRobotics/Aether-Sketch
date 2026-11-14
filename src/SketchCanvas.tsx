@@ -10,7 +10,8 @@ import { pathContours, replaceContour, beginDraft, moveDraft, endDraft, finishPe
   pathBounds, boundsContain, resizePoint, resizeBounds, rotatePoint, handlePoint, RESIZE_HANDLES,
   snapPoint, pathSnapTargets, nearestPoint, constrainAngle, TOOL_SHORTCUTS,
   trimPath, slicePath, type Draft, type DraftStep, type Point, type SketchTool, type ToolOptions, type Bounds, type ResizeHandle, type SnapGuide } from '@aether/sketch';
-import type { DrawingPath, Layer, SketchDocument } from './document';
+import { docArtboards, isGeometry, type DrawingPath, type Layer, type SketchDocument, type SymbolDef } from './document';
+import { symbolOf } from './symbols';
 import { pathVisible, pathLocked, rootGroup, groupPaths } from './structure';
 import type { NodeSelection, SnapSettings } from './VectorInspector';
 import { brushOpacity, brushOutline, dabsTo, eraseWith, newDabState, type BrushSample, type BrushStyle, type DabState } from './brush';
@@ -49,6 +50,8 @@ type Lift = { sel: PixelSelection; origin: Point; handle: ResizeHandle | 'rotate
 export interface BrushSettings { style: BrushStyle; eraserPx: number; /** Smudge tip width on screen and how much paint it carries (0–1). */ smudgePx: number; smudge: number }
 interface Props {
   contour: number; resetKey: string; doc: SketchDocument; layer: Layer | undefined; tool: EditorTool; onTool: (tool: EditorTool) => void;
+  /** The artboard exports frame, marked on the canvas when there are several. */
+  artboardID?: string;
   paint: PaintStyle; polygonSides: number; brush: BrushSettings; drawGuides: Guides; onDrawGuides: (guides: Guides) => void; onFill: (path: DrawingPath) => void; onPickPaint: (path: DrawingPath) => void;
   selected: string[]; onSelect: (ids: string[]) => void; node: NodeSelection | null; onNode: (node: NodeSelection | null) => void;
   snap: SnapSettings; onAdd: (path: DrawingPath) => void; onReplace: (paths: DrawingPath[]) => void;
@@ -172,13 +175,13 @@ export function SketchCanvas(props: Props) {
   const options = (): ToolOptions => ({ coordinateStep: 0, minimumArea: 1, curveTolerance: .25 / scale(), freehandTolerance: 1 / scale(), closeTolerance: 9 / scale(), dragThreshold: 2 / scale(), polygonSides: props.polygonSides, curvedPrimitives: true, closePenOnFinish: false });
   const paths = props.layer?.paths ?? [], editable = paths.filter(p => props.layer && pathVisible(props.layer, p) && !pathLocked(props.layer, p)), selectedPaths = paths.some(p => props.selected.includes(p.id) && props.layer && (pathLocked(props.layer, p) || !pathVisible(props.layer, p))) ? [] : editable.filter(p => props.selected.includes(p.id));
   const shown = preview.length ? preview : selectedPaths, selectedObject = shown.length === 1 ? shown[0] : undefined;
-  const selected = selectedObject && (!selectedObject.text || selectedObject.text.onPath) ? { ...selectedObject, ...pathContours(selectedObject)[props.contour], subpaths: undefined } : undefined;
+  const selected = selectedObject && !selectedObject.symbolID && (!selectedObject.text || selectedObject.text.onPath) ? { ...selectedObject, ...pathContours(selectedObject)[props.contour], subpaths: undefined } : undefined;
   const replaceNode = (next: DrawingPath | undefined) => next && selectedObject && props.onReplace([{ ...selectedObject, ...replaceContour(selectedObject,props.contour,next) }]);
   const bounds = pathBounds(shown);
   const snap = (at: Point, alt: boolean, exclude: string[] = [], omitNode?: number) => {
     const targets = props.doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p) && !exclude.includes(p.id)).flatMap(pathSnapTargets));
     if (omitNode !== undefined && selected) targets.push(...selected.points.filter((_, i) => i !== omitNode).map(point => ({ point, label: 'Anchor' })));
-    if (!props.doc.infinite) targets.push({ point: [0, 0], label: 'Origin' }, { point: [props.doc.widthPx / 2, props.doc.heightPx / 2], label: 'Artboard center' }, ...([[props.doc.widthPx, 0], [0, props.doc.heightPx], [props.doc.widthPx, props.doc.heightPx]] as Point[]).map(point => ({ point, label: 'Artboard corner' })));
+    for (const b of docArtboards(props.doc)) targets.push({ point: [b.x + b.width / 2, b.y + b.height / 2], label: 'Artboard center' }, ...([[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]] as Point[]).map(point => ({ point, label: b.x === 0 && b.y === 0 && point[0] === 0 && point[1] === 0 ? 'Origin' : 'Artboard corner' })));
     if (draftRef.current?.tool === 'pen') targets.push(...draftRef.current.points.map(point => ({ point, label: 'Anchor' })));
     const result = snapPoint(at, targets, { tolerance: props.snap.distancePx / scale(), gridStep: props.snap.grid ? props.snap.gridStepPx : undefined, bypass: !props.snap.enabled || alt });
     setGuides(result.guides); return result.point;
@@ -228,7 +231,7 @@ export function SketchCanvas(props: Props) {
     if (props.tool === 'smudge') { startSmudge(at); return; }
     if (props.tool === 'text') {
       // Clicking the edge of a path sets text along a copy of it; anywhere else makes a text box.
-      const under = editable.find(p => p.id === target.closest('[data-path-id]')?.getAttribute('data-path-id') && !p.text), guide = under && pathContours(under)[0];
+      const under = editable.find(p => p.id === target.closest('[data-path-id]')?.getAttribute('data-path-id') && isGeometry(p)), guide = under && pathContours(under)[0];
       const hit = guide && nearestPathEdge(guide, at, 8 / scale()), from = hit ? hit.edge + hit.fraction : 0;
       // Around a closed shape the text starts where it was clicked.
       const text = guide && hit ? textOnPath(guide.closed ? slicePath(guide, from, from + guide.points.length) ?? guide : guide) : newText(snap(at, e.altKey));
@@ -251,7 +254,7 @@ export function SketchCanvas(props: Props) {
     }
     if (props.tool === 'trim') {
       const id = target.closest('[data-path-id]')?.getAttribute('data-path-id'), path = editable.find(p => p.id === id);
-      if (path && !path.text && !path.subpaths?.length) {
+      if (path && isGeometry(path) && !path.subpaths?.length) {
         const pieces = trimPath(path, at, props.doc.layers.flatMap(l => l.paths.filter(p => p.id !== path.id && !p.text && pathVisible(l, p))), 10 / scale());
         if (pieces) { const next = pieces.map((p, i) => ({ ...path, ...p, id: i ? crypto.randomUUID() : path.id })); props.onSplice([path.id], next); props.onSelect(next.map(p => p.id)); }
       }
@@ -419,6 +422,10 @@ export function SketchCanvas(props: Props) {
   const pin = 4 / scale();
   // World-space layer inside FreeformCanvas: one SVG unit is one canvas pixel, and the
   // camera transform above it makes getScreenCTM() map pointers straight to drawing units.
+  const artboards = docArtboards(props.doc);
+  /** A symbol's own paths, drawn the way a layer draws its paths; the instance supplies the transform. */
+  const symbolContent = (def: SymbolDef) => def.paths.filter(q => !q.hidden).map(q => q.text ? <VectorText key={q.id} path={q} gradientID={`${ids.get(q.id)}-gradient`} />
+    : drawnParts(q).map(part => <path key={part.id} d={pathData(part)} {...paintAttributes(part, `${ids.get(q.id)}-gradient`)} />));
   // ---- Layer depth: clips, masks, effects and adjustment layers are SVG masks and filters (depth.ts). ----
   const depths = layerDepths(props.doc);
   // Masks and filters cover everything drawn, including a path being dragged and paint still landing.
@@ -442,18 +449,23 @@ export function SketchCanvas(props: Props) {
       <defs><pattern id="sketch-grid" width={props.snap.gridStepPx} height={props.snap.gridStepPx} patternUnits="userSpaceOnUse"><path d={`M${props.snap.gridStepPx} 0 H0 V${props.snap.gridStepPx}`} fill="none" stroke="#dce2e8" strokeWidth={1 / scale()} /></pattern></defs>
       <PaintDefinitions doc={props.doc} ids={ids} preview={preview} />
       <rect className="sketch-capture" x={-5e6} y={-5e6} width={1e7} height={1e7} fill="transparent" />
-      {!props.doc.infinite && <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />}
-      {props.snap.grid && !props.doc.infinite && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
+      {artboards.map(b => <g key={b.id} data-artboard={b.id} data-current={b.id === props.artboardID || undefined} pointerEvents="none">
+        <rect className="sketch-artboard" x={b.x} y={b.y} width={b.width} height={b.height} fill="white" />
+        {props.snap.grid && <rect x={b.x} y={b.y} width={b.width} height={b.height} fill="url(#sketch-grid)" />}
+        {/* Names show once there is more than one page; the current one is marked. */}
+        {artboards.length > 1 && <text className="sketch-artboard-name" x={b.x} y={b.y - 6 / scale()} fontSize={12 / scale()}>{b.name}</text>}
+        {artboards.length > 1 && b.id === props.artboardID && <rect className="sketch-artboard-current" x={b.x} y={b.y} width={b.width} height={b.height} fill="none" vectorEffect="non-scaling-stroke" />}
+      </g>)}
       {region && <defs dangerouslySetInnerHTML={{ __html: depthDefs(props.doc, region, depths) }} />}
       {stack((l, a, ghost) => <g key={l.id} data-layer-id={l.id} data-layer-role={ghost ? 'mask' : undefined} mask={a.clip} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none', opacity: ghost ? l.id === props.layer?.id ? .35 : 0 : l.opacity, mixBlendMode: ghost ? undefined : l.blend }}><g filter={ghost ? undefined : a.effects}><g id={a.id} mask={a.hide} filter={ghost ? a.effects : undefined}>
         {l.pixels && <image data-pixel-layer={l.id} href={l.pixels.src} x={l.pixels.x} y={l.pixels.y} width={l.pixels.width} height={l.pixels.height} preserveAspectRatio="none" pointerEvents="none" visibility={veiled === l.id ? 'hidden' : undefined} style={{ imageRendering: scale() >= 4 ? 'pixelated' : undefined }} />}
         {props.pending.filter(q => q.layerID === l.id).flatMap(q => q.paths).map(p => <path key={`pending-${p.id}`} data-pixel-pending="true" pointerEvents="none" d={pathData(p)}
           {...paintAttributes({ ...p, fill: p.fillGradient?.stops[0]?.color ?? p.fill, fillGradient: undefined, blurPx: undefined }, '')} style={p.blurPx ? { filter: `blur(${p.blurPx}px)` } : undefined} />)}
         {l.paths.filter(p => pathVisible(l, p)).map(p => { const path = preview.find(v => v.id === p.id) ?? p, [body, ...extras] = drawnParts(path); const content = <g data-path-id={p.id} style={{ pointerEvents: pathLocked(l, p) ? 'none' : undefined }}>
-          {path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(body, `${ids.get(p.id)}-gradient`)} />}
+          {path.symbolID ? (symbol => symbol && <g data-symbol-instance={symbol.def.id} transform={`matrix(${symbol.matrix.join(' ')})`} opacity={path.opacity}>{symbolContent(symbol.def)}</g>)(symbolOf(props.doc, path)) : path.text ? <VectorText path={path} gradientID={`${ids.get(p.id)}-gradient`} /> : <path pointerEvents={path.closed && (props.tool === 'fill' || props.tool === 'eyedropper') ? 'all' : undefined} data-vector-paint="true" d={pathData(path)} {...paintAttributes(body, `${ids.get(p.id)}-gradient`)} />}
           {extras.map(part => <path key={part.id} data-stroke-part={part.id.slice(p.id.length + 1)} pointerEvents="none" d={pathData(part)} {...paintAttributes(part, '')} />)}
           {/* The part that takes clicks: a wide invisible stroke, the box of boxed text, or a band along text on a path. */}
-          <path d={pathData(path)} fill={path.text && !path.text.onPath ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale(), path.text?.onPath ? path.text.fontSizePx * 2 : 0)} />
+          <path d={pathData(path)} fill={path.symbolID || (path.text && !path.text.onPath) ? 'transparent' : 'none'} stroke="transparent" strokeWidth={Math.max(path.widthPx, 12 / scale(), path.text?.onPath ? path.text.fontSizePx * 2 : 0)} />
           {props.selected.includes(p.id) && l.id === props.layer?.id && <path className="sketch-selection" d={pathData(path)} fill="none" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
         </g>;
           return <g key={p.id}>{clipPaths(l, p).reduce<ReactNode>((child, clip) => <g clipPath={`url(#${ids.get(clip.id)}-clip)`}>{child}</g>, content)}</g>;

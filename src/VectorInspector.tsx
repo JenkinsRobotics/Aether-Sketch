@@ -12,7 +12,7 @@ export function VectorInspector({ contour: contourIndex, paths, node, disabled, 
 }) {
   const [contour, setContour] = useState(10), [error, setError] = useState('');
   const [angle, setAngle] = useState(0), [aspect, setAspect] = useState(true);
-  const b = pathBounds(paths), full = paths.length === 1 && !paths[0].text ? paths[0] : undefined;
+  const b = pathBounds(paths), full = paths.length === 1 && !paths[0].text && !paths[0].symbolID ? paths[0] : undefined;
   const p = full ? { ...full, ...pathContours(full)[contourIndex], subpaths: undefined } : undefined;
   const edit = (changed: DrawingPath[]) => full && onReplace(changed.map(c=>({...full,...replaceContour(full,contourIndex,c)})));
   const index = node && p?.points[node.index] ? node.index : undefined;

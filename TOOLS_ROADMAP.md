@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.28)
+## Where it stands (alpha-0.1.29)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -23,7 +23,7 @@ and eyedropper follow the current layer's kind.
 | | Pixel | Vector |
 |---|---|---|
 | Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse and French curve guides, symmetry (mirror, flip, quad, radial), 1-, 2- and 3-point and fisheye perspective, isometric grid, steady stroke, predictive stroke, canvas rotation | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
-| Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No symbols or multiple artboards. No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
+| Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
 
 Pixel layer limits in this release:
 
@@ -31,16 +31,16 @@ Pixel layer limits in this release:
   Painting further away asks for another pixel layer.
 - The bitmap is a PNG inside the `.aethersketch` file. The Studio server stores
   drawings up to 16 MB; the app warns from 12 MB.
-- SVG, PNG, JPEG, WebP and OpenRaster exports include pixel layers. PDF export is
-  still vector only and says so.
+- SVG, PNG, JPEG, WebP, OpenRaster, PSD and PDF exports include pixel layers.
 - Gradient fills land on pixel layers as their first colour.
 - Merge down keeps vectors only when both layers are plain vector layers. With a
   pixel layer, a blend mode, a clip, a mask, effects or an adjustment involved, the
   result is one pixel layer (up to 4096 px a side) with all of that applied.
 - Clips, masks, effects and adjustments are in SVG, PNG, JPEG, WebP and OpenRaster
   exports (OpenRaster gets them applied to each layer's image; an adjustment layer
-  shows only in its merged image). PDF applies clips and masks made of vector
-  shapes; it leaves out effects and adjustments and says so.
+  shows only in its merged image; PSD the same). PDF applies clips and masks, and
+  carries pixel layers with their effects; it leaves out adjustment layers and
+  effects on vector layers, and says so.
 - A stroke being painted on a clipped, masked or effect layer shows plain until the
   pen lifts. Shapes hidden by a mask can still be clicked.
 - A stroke in progress, and the layer being smudged, show above every layer until
@@ -96,7 +96,25 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
    ellipse or French curve is on it from its first point. Left for later: a
    two-finger twist gesture, more French curve templates, tilted ellipses in
    predictive stroke. (SketchBook guides and Predictive Stroke.)
-7. **Document.** Multiple artboards, symbols, PSD import and export.
+7. **Document.** Done in alpha-0.1.29:
+   - **Artboards.** A drawing can have several named pages (Inspector →
+     Artboards): add, name, place and size them by number. Image and SVG exports
+     frame the current artboard, PDF has a page for each, and one command exports
+     every artboard as PNG files in a ZIP. Every artboard shows the same layers;
+     moving one moves the frame, not the drawing.
+   - **Symbols.** A selection becomes a symbol with a copy in its place
+     (Inspector → Symbols). Copies move, scale, rotate and flip like any object;
+     redrawing the symbol from an edited copy updates every copy. Symbols do not
+     nest and do not keep a "draw inside" clip.
+   - **PSD.** Export writes layers as pixels with name, opacity, blend mode and
+     visibility, masks and effects applied, plus the merged picture. Import reads
+     8-bit RGB files (raw or RLE) as pixel layers; groups are flattened and layer
+     masks, text and smart objects come in as the pixels the file stores.
+   - **Pixel layers in PDF.** Each pixel layer is embedded as an image at one
+     pixel per document pixel, with its masks, clip and effects applied.
+   Left for later: dragging and resizing artboards on the canvas, artboard size
+   presets, nested symbols, a symbol library shared between drawings, PSD layer
+   masks and groups, 16-bit and CMYK PSD.
 8. **Motion.** Flipbook frames and time-lapse recording. Last, because nothing
    else depends on it.
 

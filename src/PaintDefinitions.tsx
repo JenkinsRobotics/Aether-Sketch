@@ -1,8 +1,8 @@
 import { gradientVector, pathData } from '@aether/sketch';
 import type { DrawingPath, SketchDocument } from './document';
-import { blurRegion } from './paint';
+import { blurRegion, paintedPaths } from './paint';
 export function PaintDefinitions({ doc, ids, preview }: { doc: SketchDocument; ids: Map<string, string>; preview: DrawingPath[] }) {
-  return <defs>{doc.layers.flatMap(l => l.paths).map(original => {
+  return <defs>{paintedPaths(doc).map(original => {
     const p = preview.find(p => p.id === original.id) ?? original, id = ids.get(p.id)!, g = p.fillGradient;
     const stops = g?.stops.map((s, i) => <stop key={i} offset={s.offset} stopColor={s.color} stopOpacity={s.opacity} />);
     return <g key={id}>

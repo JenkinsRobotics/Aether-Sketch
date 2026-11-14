@@ -2,8 +2,9 @@ import { textSVG } from './text';
 import { gradientVector, pathBounds, pathData, transformPath } from '@aether/sketch';
 import { dashArray, drawnParts } from './vector';
 import { ancestors, pathLocked, pathVisible } from './structure';
-import type { DrawingPath, Layer, SketchDocument } from './document';
+import { docArtboards, type DrawingPath, type Layer, type SketchDocument } from './document';
 import { pixelBounds, unionRect } from './pixels';
+import { symbolOf } from './symbols';
 import { composeLayers, depthAttributes, depthDefs, depthRegion, effectReach, layerDepths, layerDOMID, usesDepth, type Depth } from './depth';
 export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash', 'dashPx', 'arrowStart', 'arrowEnd', 'widthProfile'] as const;
 export type PaintStyle = Pick<DrawingPath, typeof paintKeys[number]>;
@@ -30,7 +31,7 @@ export function clipPaths(layer: Layer, path: DrawingPath): DrawingPath[] {
 /** Keep references valid after deletion, ungrouping, opening or moving a boundary. */
 export function repairClips(doc: SketchDocument): SketchDocument {
   return { ...doc, layers: doc.layers.map(l => ({ ...l, groups: l.groups?.map(g =>
-    g.clipPathID && !l.paths.some(p => p.id === g.clipPathID && p.closed && !p.text && p.groupID === g.id)
+    g.clipPathID && !l.paths.some(p => p.id === g.clipPathID && p.closed && !p.text && !p.symbolID && p.groupID === g.id)
       ? { ...g, clipPathID: undefined } : g) })) };
 }
 /** A live boundary plus its contents form a normal movable clipping group. */
@@ -45,8 +46,10 @@ export function addInside(layer: Layer, targetID: string, paths: DrawingPath[], 
   next.splice(index, 0, ...paths.map(p => ({ ...p, groupID: group.id })));
   return { ...layer, groups: existing ? layer.groups : [...(layer.groups ?? []), group], paths: next };
 }
+/** Every path that can be drawn: the layers' own and the ones inside symbols. */
+export const paintedPaths = (doc: SketchDocument) => [...doc.layers.flatMap(l => l.paths), ...(doc.symbols ?? []).flatMap(s => s.paths)];
 export function paintIDs(doc: SketchDocument) {
-  return new Map(doc.layers.flatMap(l => l.paths).map((p, i) => [p.id, `sketch-vector-${i}`]));
+  return new Map(paintedPaths(doc).map((p, i) => [p.id, `sketch-vector-${i}`]));
 }
 /** Duplicate complete groups with new boundary references; a single child stays independent. */
 export function duplicatePaintSelection(layer: Layer, selected: string[], nextID = () => crypto.randomUUID()) {
@@ -65,8 +68,10 @@ export function duplicatePaintSelection(layer: Layer, selected: string[], nextID
 }
 const attributeNames: Record<string, string> = { fillRule: 'fill-rule', fillOpacity: 'fill-opacity', strokeWidth: 'stroke-width', strokeOpacity: 'stroke-opacity', strokeLinecap: 'stroke-linecap', strokeLinejoin: 'stroke-linejoin', strokeDasharray: 'stroke-dasharray' };
 const xmlText = (value: string) => value.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
-/** What an export frames: the artboard, or for an infinite drawing everything drawn, with a small margin. */
-export function exportArea(doc: SketchDocument) {
+/** What an export frames: the given artboard (else the first), or for an infinite drawing everything drawn, with a small margin. */
+export function exportArea(doc: SketchDocument, artboardID?: string) {
+  const boards = docArtboards(doc), board = boards.find(b => b.id === artboardID) ?? boards[0];
+  if (board) return { x: board.x, y: board.y, width: board.width, height: board.height };
   // Working masks are not part of the picture; shadows and glows are.
   const depths = layerDepths(doc), seen = doc.layers.filter((_, i) => depths[i].drawn);
   const drawn = doc.infinite ? unionRect(pathBounds(seen.flatMap(l => l.paths.filter(p => pathVisible(l, p)))), pixelBounds(seen)) : null;
@@ -82,7 +87,8 @@ export function blurRegion(p: DrawingPath) {
 }
 /** `only` limits the picture to those layers (by id), still clipped and masked as they are in the whole drawing. */
 export function drawingSVG(doc: SketchDocument, area = exportArea(doc), only?: readonly string[]): string {
-  const ids = paintIDs(doc), all = doc.layers.flatMap(l => l.paths);
+  const n = (v: number) => +v.toPrecision(10);
+  const ids = paintIDs(doc), all = paintedPaths(doc);
   const defs = all.map(p => {
     const id = ids.get(p.id)!, g = p.fillGradient;
     const clip = `<clipPath id="${id}-clip" clipPathUnits="userSpaceOnUse"><path d="${pathData(p)}" clip-rule="${p.fillRule ?? 'nonzero'}"/></clipPath>`;
@@ -98,11 +104,14 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc), only?: r
   const bases = new Set(depths.flatMap((d, i) => inPicture(i) && d.clipTo !== undefined ? [d.clipTo] : []));
   const shown = (index: number) => inPicture(index) || bases.has(index);
   const content = (l: Layer, d: Depth) => {
-    const markup = l.paths.filter(p => pathVisible({ ...l, visible: true }, p)).map(p => {
+    const drawn = (p: DrawingPath): string => {
+      // A symbol instance draws the symbol's paths under the instance's transform.
+      const symbol = symbolOf(doc, p);
+      if (p.symbolID) return symbol ? `<g transform="matrix(${symbol.matrix.map(n).join(' ')})"${p.opacity < 1 ? ` opacity="${p.opacity}"` : ''}>${symbol.def.paths.filter(q => !q.hidden).map(drawn).join('')}</g>` : '';
       const attributes = (path: DrawingPath) => Object.entries(paintAttributes(path, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
-      const parts = drawnParts(p).map(part => `<path d="${pathData(part)}" ${attributes(part)}/>`).join('');
-      return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attributes(p)) : parts));
-    }).join('');
+      return p.text ? textSVG(p, attributes(p)) : drawnParts(p).map(part => `<path d="${pathData(part)}" ${attributes(part)}/>`).join('');
+    };
+    const markup = l.paths.filter(p => pathVisible({ ...l, visible: true }, p)).map(p => clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, drawn(p))).join('');
     const b = l.pixels, bitmap = b ? `<image href="${b.src}" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" preserveAspectRatio="none"/>` : '';
     const a = depthAttributes(l, d), named = a.hide || bases.has(d.index) || d.role === 'mask';
     // A mask layer's own effects shape the mask: blurring it feathers the edge.
@@ -116,6 +125,5 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc), only?: r
   }, (below, d) => `<g filter="url(#${layerDOMID(d.index)}-adjust)">${below.join('')}</g>`, inPicture).join('');
   // Never drawn as themselves: mask layers, and clip bases left out of the picture.
   const unseen = doc.layers.map((l, i) => (depths[i].role === 'mask' ? l.visible && shown(depths.findIndex(d => d.hide.includes(i))) : bases.has(i) && !inPicture(i)) ? content(l, depths[i]) : '').join('');
-  const n = (v: number) => +v.toPrecision(10);
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${n(area.width)}" height="${n(area.height)}" viewBox="${n(area.x)} ${n(area.y)} ${n(area.width)} ${n(area.height)}"><defs>${defs}${region ? depthDefs(doc, region, depths) : ''}${unseen}</defs>${body}</svg>`;
 }

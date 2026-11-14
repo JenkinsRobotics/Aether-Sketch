@@ -5,7 +5,9 @@ import { pathVisible } from './structure';
 import { pathGlyphs, textMatrix } from './text';
 import type { DrawingPath, Layer, PixelBitmap, SketchDocument } from './document';
 import { depthRegion, layerDepths } from './depth';
-import { PIXEL_MAX_SIDE, canvasBitmap } from './pixels';
+import { PIXEL_MAX_SIDE, alphaBounds, canvasBitmap } from './pixels';
+import { writePSD, type PSDLayer } from './psd';
+import { symbolOf } from './symbols';
 
 type Area = ReturnType<typeof exportArea>;
 /** Raster exports: the longest side lands between 512 and 8192 px, so an infinite drawing exports at a usable size at any zoom. */
@@ -15,8 +17,8 @@ export function rasterSize(area: Area, scale = 2, maxSide = 8192) {
 }
 
 /** PNG, JPEG or WebP through the browser's own encoder. JPEG has no transparency, so it gets a white page. */
-export async function rasterBlob(doc: SketchDocument, type: 'image/png' | 'image/jpeg' | 'image/webp', area = exportArea(doc), maxSide?: number, only?: readonly string[]): Promise<Blob> {
-  const size = rasterSize(area, 2, maxSide), url = URL.createObjectURL(new Blob([drawingSVG(doc, area, only)], { type: 'image/svg+xml' })), image = new Image();
+export async function rasterBlob(doc: SketchDocument, type: 'image/png' | 'image/jpeg' | 'image/webp', area = exportArea(doc), maxSide?: number, only?: readonly string[], scale = 2): Promise<Blob> {
+  const size = rasterSize(area, scale, maxSide), url = URL.createObjectURL(new Blob([drawingSVG(doc, area, only)], { type: 'image/svg+xml' })), image = new Image();
   try {
     await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
     const canvas = document.createElement('canvas'); canvas.width = size.width; canvas.height = size.height;
@@ -59,9 +61,32 @@ const contourOps = (p: SketchPath) => pathContours(p).map(c => {
 }).join(' ');
 const pdfString = (s: string) => `(${s.replace(/[^\x20-\x7e]/g, '?').replace(/[\\()]/g, c => `\\${c}`)})`;
 
-export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Array {
-  // PDF pages are 3–14400 pt; very large or tiny infinite drawings are scaled to a 1000 pt page.
-  const side = Math.max(area.width, area.height), s = side > 14400 || side < 72 ? 1000 / side : 1;
+/** A pixel layer as PDF image data: where it sits, and its colour and coverage planes, each zlib-compressed. */
+export interface PDFImage { x: number; y: number; width: number; height: number; rgb: Uint8Array; alpha: Uint8Array }
+const deflate = async (bytes: Uint8Array) => new Uint8Array(await new Response(new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+/** The pixel layers as images for `drawingPDF`, by layer index. Each is the layer as it looks on its own, at one pixel per
+ * document pixel, with its masks, clip and effects already applied. A layer too large for one bitmap is left out. */
+export async function pdfImages(doc: SketchDocument): Promise<Map<number, PDFImage>> {
+  const depths = layerDepths(doc), out = new Map<number, PDFImage>();
+  for (const [i, l] of doc.layers.entries()) {
+    const mask = depths[i].role === 'mask';
+    if (l.kind !== 'pixel' || !l.pixels || !(depths[i].drawn || (mask && l.visible))) continue;
+    // A mask is rendered as plain paint: its coverage is what the PDF needs.
+    const solo: SketchDocument = { ...doc, layers: doc.layers.map(x => x.id === l.id ? { ...x, visible: true, opacity: 1, blend: undefined, ...(mask ? { role: undefined } : {}) } : x) };
+    const flat = await flattenLayers(solo, [l.id]); if ('problem' in flat || !flat.bitmap) continue;
+    const image = new Image(); image.src = flat.bitmap.src; await image.decode();
+    const { x, y, width, height } = flat.bitmap, canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    const context = canvas.getContext('2d'); if (!context) continue;
+    context.drawImage(image, 0, 0);
+    const data = context.getImageData(0, 0, width, height).data, rgb = new Uint8Array(width * height * 3), alpha = new Uint8Array(width * height);
+    for (let p = 0; p < alpha.length; p++) { rgb[p * 3] = data[p * 4]; rgb[p * 3 + 1] = data[p * 4 + 1]; rgb[p * 3 + 2] = data[p * 4 + 2]; alpha[p] = data[p * 4 + 3]; }
+    out.set(i, { x, y, width, height, rgb: await deflate(rgb), alpha: await deflate(alpha) });
+  }
+  return out;
+}
+
+/** One page per area (an artboard each). `images` puts pixel layers on the page; without it they are left out. */
+export function drawingPDF(doc: SketchDocument, areas: Area | Area[] = exportArea(doc), images: ReadonlyMap<number, PDFImage> = new Map()): Uint8Array {
   const states = new Map<string, string>(), state = (ca: number, CA: number, bm = 'Normal', more = '') => {
     const key = `<< /Type /ExtGState /ca ${num(ca)} /CA ${num(CA)} /BM /${bm}${more} >>`;
     if (!states.has(key)) states.set(key, `GS${states.size}`); return `/${states.get(key)} gs`;
@@ -88,48 +113,73 @@ export function drawingPDF(doc: SketchDocument, area = exportArea(doc)): Uint8Ar
     } else ops.push(`${contourOps(p)} ${fill && stroke ? 'B' : fill ? 'f' : 'S'}${fill && p.fillRule === 'evenodd' ? '*' : ''}`);
     return `q ${ops.join(' ')} Q`;
   };
-  // Clipping and mask layers become soft masks. ponytail: vector content only, like the rest of this export; pixel masks, layer effects and adjustments are left out (the app says so).
+  // Clipping and mask layers become soft masks; pixel layers are images (already masked and clipped, so they take no soft mask).
+  // ponytail: effects on vector layers and adjustment layers are left out (the app says so); rasterise those layers too if print needs them.
   const depths = layerDepths(doc), used = doc.layers.map((l, i) => depths[i].drawn || (depths[i].role === 'mask' && l.visible));
-  const draw = (l: Layer, paint = (p: DrawingPath) => p) => l.paths.filter(p => pathVisible(l, p)).flatMap(drawnParts).map(p => shape(paint(p), l)).filter(Boolean).join('\n');
-  const contents = doc.layers.map((l, i) => used[i] ? draw(l) : '');
-  // Every form is in page space (origin at the frame's corner) and the layer forms shift their own content there. Nothing then
-  // sets a soft mask under a shifted matrix, which macOS Preview draws wrongly (it loses most of the mask).
-  const matrix = `${num(s)} 0 0 ${num(-s)} 0 ${num(area.height * s)}`, shift = `1 0 0 1 ${num(-area.x)} ${num(-area.y)} cm\n`;
-  const width = num(area.width * s), height = num(area.height * s);
-  const objects: string[] = [];
-  const add = (body: string) => { objects.push(body); return objects.length; };
-  const stream = (dict: string, content: string) => `<< ${dict} /Length ${new TextEncoder().encode(content).length} >>\nstream\n${content}\nendstream`;
-  const font = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
-  const gsRefs: string[] = []; const reserve = () => add(''); // filled once every state is known
-  const resourcesID = reserve(), xobjects: string[] = [];
-  const form = (name: string, content: string) => {
-    const id = add(stream(`/Type /XObject /Subtype /Form /BBox [0 0 ${num(area.width)} ${num(area.height)}] /Group << /S /Transparency /CS /DeviceRGB /I true >> /Resources ${resourcesID} 0 R`, content));
-    xobjects.push(`/${name} ${id} 0 R`); return id;
+  // A symbol instance is its symbol's paths under the instance's transform.
+  const drawn = (p: DrawingPath, l: Layer, paint: (p: DrawingPath) => DrawingPath): string => {
+    if (!p.symbolID) return drawnParts(p).map(part => shape(paint(part), l)).filter(Boolean).join('\n');
+    const symbol = symbolOf(doc, p); if (!symbol) return '';
+    const inside: Layer = { id: symbol.def.id, name: symbol.def.name, visible: true, locked: false, paths: symbol.def.paths };
+    return `q ${symbol.matrix.map(num).join(' ')} cm\n${symbol.def.paths.filter(q => !q.hidden).map(q => drawn({ ...q, opacity: q.opacity * p.opacity }, inside, paint)).filter(Boolean).join('\n')}\nQ`;
   };
-  const layerForm = contents.map((content, i) => used[i] ? form(`L${i}`, shift + content) : 0);
-  // A masked layer is drawn through a wrapper. Its soft mask paints the mask layers black on white, so brightness is what stays visible.
+  const draw = (l: Layer, paint = (p: DrawingPath) => p) => l.paths.filter(p => pathVisible(l, p)).map(p => drawn(p, l, paint)).filter(Boolean).join('\n');
+  const place = (i: number, name: string) => { const im = images.get(i)!; return `q ${im.width} 0 0 ${-im.height} ${im.x} ${im.y + im.height} cm /${name} Do Q`; };
+  const contents = doc.layers.map((l, i) => !used[i] ? '' : images.has(i) ? place(i, `Im${i}`) : draw(l));
+  type Stream = { dict: string; data: Uint8Array };
+  const objects: (string | Stream)[] = [], encoder = new TextEncoder();
+  const add = (body: string | Stream) => { objects.push(body); return objects.length; };
+  const stream = (dict: string, content: string): Stream => ({ dict, data: encoder.encode(content) });
+  const font = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  const gsRefs: string[] = []; const reserve = () => add(''); // filled once everything is known
+  const resourcesID = reserve(), pagesID = reserve(), xobjects: string[] = [];
+  for (const [i, im] of images) {
+    const size = `/Type /XObject /Subtype /Image /Width ${im.width} /Height ${im.height} /BitsPerComponent 8 /Filter /FlateDecode /Interpolate true`;
+    const coverage = add({ dict: `${size} /ColorSpace /DeviceGray`, data: im.alpha });
+    xobjects.push(`/Im${i} ${add({ dict: `${size} /ColorSpace /DeviceRGB /SMask ${coverage} 0 R`, data: im.rgb })} 0 R`);
+    // For a mask layer: an opaque image that is black where the mask is painted.
+    if (depths[i].role === 'mask') xobjects.push(`/ImK${i} ${add({ dict: `${size} /ColorSpace /DeviceGray /Decode [1 0]`, data: im.alpha })} 0 R`);
+  }
   const black = (p: DrawingPath): DrawingPath => ({ ...p, color: '#000000', fill: p.fill === null ? null : '#000000', fillGradient: undefined });
-  const shownForm = doc.layers.map((_, i) => {
-    const masks = depths[i].hide.filter(m => contents[m]);
-    if (!used[i] || !masks.length) return { name: `L${i}`, id: layerForm[i] };
-    const hide = form(`H${i}`, shift + masks.map(m => draw(doc.layers[m], black)).join('\n'));
-    return { name: `W${i}`, id: form(`W${i}`, `q ${state(1, 1, 'Normal', ` /SMask << /Type /Mask /S /Luminosity /BC [1 1 1] /G ${hide} 0 R >>`)} /L${i} Do Q`) };
+  const pageIDs = (Array.isArray(areas) ? areas : [areas]).map((area, n) => {
+    // PDF pages are 3–14400 pt; very large or tiny infinite drawings are scaled to a 1000 pt page.
+    const side = Math.max(area.width, area.height), s = side > 14400 || side < 72 ? 1000 / side : 1;
+    // Every form is in page space (origin at the frame's corner) and the layer forms shift their own content there. Nothing then
+    // sets a soft mask under a shifted matrix, which macOS Preview draws wrongly (it loses most of the mask).
+    // ponytail: so each page carries its own copy of every layer; share them if many-artboard PDFs grow too large.
+    const matrix = `${num(s)} 0 0 ${num(-s)} 0 ${num(area.height * s)}`, shift = `1 0 0 1 ${num(-area.x)} ${num(-area.y)} cm\n`;
+    const form = (name: string, content: string) => {
+      const id = add(stream(`/Type /XObject /Subtype /Form /BBox [0 0 ${num(area.width)} ${num(area.height)}] /Group << /S /Transparency /CS /DeviceRGB /I true >> /Resources ${resourcesID} 0 R`, content));
+      xobjects.push(`/P${n}${name} ${id} 0 R`); return id;
+    };
+    const layerForm = contents.map((content, i) => used[i] ? form(`L${i}`, shift + content) : 0);
+    // A masked layer is drawn through a wrapper. Its soft mask paints the mask layers black on white, so brightness is what stays visible.
+    const shownForm = doc.layers.map((_, i) => {
+      const masks = images.has(i) ? [] : depths[i].hide.filter(m => contents[m]);
+      if (!used[i] || !masks.length) return { name: `P${n}L${i}`, id: layerForm[i] };
+      const hide = form(`H${i}`, shift + masks.map(m => images.has(m) ? place(m, `ImK${m}`) : draw(doc.layers[m], black)).join('\n'));
+      return { name: `P${n}W${i}`, id: form(`W${i}`, `q ${state(1, 1, 'Normal', ` /SMask << /Type /Mask /S /Luminosity /BC [1 1 1] /G ${hide} 0 R >>`)} /P${n}L${i} Do Q`) };
+    });
+    const page = doc.layers.map((layer, i) => {
+      if (!depths[i].drawn) return '';
+      const base = depths[i].clipTo, clip = base !== undefined && !images.has(i) && contents[base] ? ` /SMask << /Type /Mask /S /Alpha /G ${shownForm[base].id} 0 R >>` : '';
+      return `q ${state(layer.opacity ?? 1, layer.opacity ?? 1, PDF_BLEND[layer.blend ?? 'normal'], clip)} /${shownForm[i].name} Do Q`;
+    }).filter(Boolean).reverse().join('\n');
+    const pageContent = add(stream('', `q ${matrix} cm\n${page}\nQ`));
+    return add(`<< /Type /Page /Parent ${pagesID} 0 R /MediaBox [0 0 ${num(area.width * s)} ${num(area.height * s)}] /Resources ${resourcesID} 0 R /Contents ${pageContent} 0 R /Group << /S /Transparency /CS /DeviceRGB >> >>`);
   });
-  const page = doc.layers.map((layer, i) => {
-    if (!depths[i].drawn) return '';
-    const base = depths[i].clipTo, clip = base !== undefined && contents[base] ? ` /SMask << /Type /Mask /S /Alpha /G ${shownForm[base].id} 0 R >>` : '';
-    return `q ${state(layer.opacity ?? 1, layer.opacity ?? 1, PDF_BLEND[layer.blend ?? 'normal'], clip)} /${shownForm[i].name} Do Q`;
-  }).filter(Boolean).reverse().join('\n');
-  const pageContent = add(stream('', `q ${matrix} cm\n${page}\nQ`));
   for (const [key] of states) gsRefs.push(`/${states.get(key)} ${add(key)} 0 R`);
   objects[resourcesID - 1] = `<< /Font << /F1 ${font} 0 R >> /ExtGState << ${gsRefs.join(' ')} >> /XObject << ${xobjects.join(' ')} >> >>`;
-  const pages = add(''), pageID = add(`<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${width} ${height}] /Resources ${resourcesID} 0 R /Contents ${pageContent} 0 R /Group << /S /Transparency /CS /DeviceRGB >> >>`);
-  objects[pages - 1] = `<< /Type /Pages /Kids [${pageID} 0 R] /Count 1 >>`;
-  const catalog = add(`<< /Type /Catalog /Pages ${pages} 0 R >>`);
-  const encoder = new TextEncoder(), offsets: number[] = [], parts: Uint8Array[] = []; let length = 0;
-  const write = (text: string) => { const bytes = encoder.encode(text); parts.push(bytes); length += bytes.length; };
+  objects[pagesID - 1] = `<< /Type /Pages /Kids [${pageIDs.map(id => `${id} 0 R`).join(' ')}] /Count ${pageIDs.length} >>`;
+  const catalog = add(`<< /Type /Catalog /Pages ${pagesID} 0 R >>`);
+  const offsets: number[] = [], parts: Uint8Array[] = []; let length = 0;
+  const bytes = (data: Uint8Array) => { parts.push(data); length += data.length; }, write = (text: string) => bytes(encoder.encode(text));
   write('%PDF-1.7\n%\u00e2\u00e3\u00cf\u00d3\n');
-  objects.forEach((body, i) => { offsets.push(length); write(`${i + 1} 0 obj\n${body}\nendobj\n`); });
+  objects.forEach((body, i) => {
+    offsets.push(length);
+    if (typeof body === 'string') write(`${i + 1} 0 obj\n${body}\nendobj\n`);
+    else { write(`${i + 1} 0 obj\n<< ${body.dict} /Length ${body.data.length} >>\nstream\n`); bytes(body.data); write('\nendstream\nendobj\n'); }
+  });
   const xref = length;
   write(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map(o => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
   const result = new Uint8Array(length); let at = 0; for (const p of parts) { result.set(p, at); at += p.length; }
@@ -173,4 +223,27 @@ export async function drawingOpenRaster(doc: SketchDocument, area = exportArea(d
   const encoder = new TextEncoder();
   return storedZip([{ name: 'mimetype', data: encoder.encode('image/openraster') }, { name: 'stack.xml', data: encoder.encode(stack) },
     ...layers.map(({ name, data }) => ({ name, data })), { name: 'mergedimage.png', data: merged }, { name: 'Thumbnails/thumbnail.png', data: thumbnail }]);
+}
+
+// ---- Photoshop (.psd): layers as pixels, one pixel per document pixel, so pixel layers come through unchanged.
+/** Like OpenRaster, each layer's pixels have its masks, clip and effects applied; mask layers are not layers of their own.
+ * ponytail: an adjustment layer exports as its own (usually empty) content; only the merged picture shows the adjustment. */
+export async function drawingPSD(doc: SketchDocument, area = exportArea(doc)): Promise<Uint8Array> {
+  const size = rasterSize(area, 1), canvas = document.createElement('canvas'); canvas.width = size.width; canvas.height = size.height;
+  const context = canvas.getContext('2d', { willReadFrequently: true }); if (!context) throw new Error('Image export is unavailable in this browser.');
+  const pixels = async (d: SketchDocument, only?: string[]) => {
+    const image = await createImageBitmap(await rasterBlob(d, 'image/png', area, undefined, only, 1));
+    context.clearRect(0, 0, size.width, size.height); context.drawImage(image, 0, 0, size.width, size.height); image.close();
+    return context.getImageData(0, 0, size.width, size.height).data;
+  };
+  const depths = layerDepths(doc), layers: PSDLayer[] = [];
+  for (const [i, l] of doc.layers.entries()) {
+    if (depths[i].role === 'mask') continue;
+    const data = await pixels({ ...doc, layers: doc.layers.map(x => x.id === l.id ? { ...x, visible: true, opacity: 1, blend: undefined } : x) }, [l.id]);
+    // Only the painted part of each layer is stored.
+    const b = alphaBounds(data, size.width, size.height) ?? { x: 0, y: 0, width: 0, height: 0 }, rgba = new Uint8Array(b.width * b.height * 4);
+    for (let y = 0; y < b.height; y++) rgba.set(data.subarray(((b.y + y) * size.width + b.x) * 4, ((b.y + y) * size.width + b.x + b.width) * 4), y * b.width * 4);
+    layers.push({ name: l.name, ...b, rgba, opacity: l.opacity ?? 1, blend: l.blend ?? 'normal', visible: l.visible });
+  }
+  return writePSD(size.width, size.height, layers, await pixels(doc));
 }

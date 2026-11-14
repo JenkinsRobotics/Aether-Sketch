@@ -1,10 +1,10 @@
 import { Button, FieldRow, NumberField, SelectField } from '@aether/ui';
 import { compoundPath, pathContours, type BooleanOperation } from '@aether/sketch';
 import { useEffect, useRef, useState } from 'react';
-import type { DrawingPath } from './document';
+import { isGeometry, type DrawingPath } from './document';
 export function RegionInspector({ paths, disabled, onSplice, onSelect, contour, onContour }: {paths:DrawingPath[];disabled:boolean;onSplice:(ids:string[],paths:DrawingPath[])=>void;onSelect:(ids:string[])=>void;contour:number;onContour:(index:number)=>void}) {
   const [tolerance,setTolerance]=useState(.25),[error,setError]=useState('');
-  const closed=paths.length>1&&paths.every(p=>!p.text&&pathContours(p).every(c=>c.closed));
+  const closed=paths.length>1&&paths.every(p=>isGeometry(p)&&pathContours(p).every(c=>c.closed));
   const [busy,setBusy]=useState(false), worker=useRef<Worker|null>(null), version=useRef('');
   version.current=JSON.stringify(paths)+disabled;
   useEffect(()=>()=>worker.current?.terminate(),[]);

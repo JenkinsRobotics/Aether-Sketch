@@ -28,8 +28,9 @@ import { AetherIcon, SelectField, ToolIcon, Slider, MenuButton } from '@aether/u
 import { SketchCanvas, type BrushSettings, type EditorTool, type PixelSelect } from './SketchCanvas';
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
-import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, repairClips, type PaintStyle } from './paint';
-import { drawingOpenRaster, drawingPDF, flattenLayers, rasterBlob } from './export';
+import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, exportArea, repairClips, type PaintStyle } from './paint';
+import { drawingOpenRaster, drawingPDF, drawingPSD, flattenLayers, pdfImages, rasterBlob, storedZip } from './export';
+import { importPSD } from './psd-import';
 import { BRUSH_PRESETS } from './brush';
 import { BrushPanel } from './BrushPanel';
 import { SAMPLES } from './sample';
@@ -40,8 +41,10 @@ import { ancestors, flattenInto, flattenPlan, mergeDown, mergeKind } from './str
 import { depthRegion, hasEffects, layerDepths } from './depth';
 import { LayerEffectsPanel, LayerRoleFields } from './LayerDepthPanel';
 import { LayersPanel } from './LayersPanel';
+import { ArtboardPanel } from './ArtboardPanel';
+import { SymbolPanel } from './SymbolPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
-import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
+import { BLEND_MODES, docArtboards, isGeometry, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
 import { canvasBitmap, clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
   type Matrix, type PixelResult, type PixelSelection, type Rect, type SelectMode, type SelectionResult } from './pixels';
 import { useDocument } from './useDocument';
@@ -110,6 +113,8 @@ const EXPORTS = [
   { id: 'export', label: 'Export SVG (Inkscape layers)', extension: 'svg', mime: 'image/svg+xml' }, { id: 'export-pdf', label: 'Export PDF', extension: 'pdf', mime: 'application/pdf' },
   { id: 'export-png', label: 'Export PNG', extension: 'png', mime: 'image/png' }, { id: 'export-jpeg', label: 'Export JPEG', extension: 'jpg', mime: 'image/jpeg' },
   { id: 'export-webp', label: 'Export WebP', extension: 'webp', mime: 'image/webp' }, { id: 'export-ora', label: 'Export OpenRaster (GIMP, Krita)', extension: 'ora', mime: 'image/openraster' },
+  { id: 'export-psd', label: 'Export PSD (Photoshop layers)', extension: 'psd', mime: 'image/vnd.adobe.photoshop' },
+  { id: 'export-pages', label: 'Export every artboard (PNG files in a ZIP)', extension: 'zip', mime: 'application/zip' },
 ] as const;
 /** Deep zoom: 0.1% to 1,000,000%. Brush and eraser sizes are on screen, so zooming in and drawing adds finer detail.
  * ponytail: ceiling set by the browser's float32 rendering; rebase coordinates near the camera to go further. */
@@ -187,9 +192,11 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   };
   const selectBoard = (ids: string[]) => { setBoardSelection(ids); if (ids.length) { setSelected([]); setNode(null); } };
   const chosenBoard = board.filter(i => boardSelection.includes(i.id));
-  const artboard = { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
+  // The current artboard is what exports frame and what align and select-all work against. An infinite canvas has none.
+  const [artboardID, setArtboardID] = useState<string>(), artboards = docArtboards(doc), currentArtboard = artboards.find(b => b.id === artboardID) ?? artboards[0];
+  const artboard = currentArtboard ?? { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
   const drawn = unionRect(pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths)), pixelBounds(doc.layers));
-  const contentBounds = doc.infinite ? drawn ?? artboard : drawn ? { x: Math.min(0, drawn.x), y: Math.min(0, drawn.y), width: Math.max(doc.widthPx, drawn.x + drawn.width) - Math.min(0, drawn.x), height: Math.max(doc.heightPx, drawn.y + drawn.height) - Math.min(0, drawn.y) } : artboard;
+  const contentBounds = artboards.reduce<Rect | null>((all, b) => unionRect(all, b), drawn) ?? artboard;
   // Gallery-free storage rule: files become items here; images are embedded as data URLs, other files as named cards.
   const attach = async (files: File[], at: FreeformPoint) => {
     const added: FreeformItem[] = [];
@@ -229,7 +236,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   /** The knife cuts the selected paths, or with nothing selected every path on the layer that its line crosses. */
   const knife = (a: [number, number], b: [number, number]) => {
     if (layer.locked || !layer.visible) return;
-    const cut = new Map((chosen.length ? chosen : layer.paths).filter(p => !p.text && !pathLocked(layer, p) && pathVisible(layer, p)).flatMap(p => {
+    const cut = new Map((chosen.length ? chosen : layer.paths).filter(p => isGeometry(p) && !pathLocked(layer, p) && pathVisible(layer, p)).flatMap(p => {
       const pieces = knifePath(p, a, b); return pieces ? [[p.id, pieces.map((piece, i) => ({ ...p, ...piece, id: i ? crypto.randomUUID() : p.id }))] as const] : [];
     }));
     if (!cut.size) { setNotice('The knife did not cut through a path on this layer. Drag it all the way across a shape.'); return; }
@@ -322,7 +329,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     setLayerID(created.id); setInsideID(null); setNotice('Painting on a new pixel layer.'); return created.id;
   };
   const add = (paths: DrawingPath[]) => {
-    if (workspace === 'pixel' && !paths.some(p => p.text)) { const clip = selectionRef.current; editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint', clip)); return; }
+    if (workspace === 'pixel' && paths.every(isGeometry)) { const clip = selectionRef.current; editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint', clip)); return; }
     if (layer.kind !== 'pixel' && !layer.adjust) { addVector(paths); return; }
     // Vector drawing on a pixel layer: an unpainted one becomes a vector layer, otherwise a vector layer is added above it.
     if (!layer.pixels && !layer.adjust) { commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return { ...rest, paths }; }) })); return; }
@@ -404,11 +411,18 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   /** Open formats only: SVG (Inkscape layers), PDF, PNG, JPEG, WebP and OpenRaster (GIMP, Krita). */
   const exportAs = async (format: typeof EXPORTS[number]) => {
     try {
-      const data = format.id === 'export' ? new Blob([drawingSVG(doc)], { type: format.mime }) : format.id === 'export-pdf' ? new Blob([drawingPDF(doc) as BlobPart], { type: format.mime })
-        : format.id === 'export-ora' ? new Blob([await drawingOpenRaster(doc) as BlobPart], { type: format.mime }) : await rasterBlob(doc, format.mime as 'image/png' | 'image/jpeg' | 'image/webp');
+      // Images and SVG frame the current artboard; PDF has a page for each one.
+      const area = exportArea(doc, currentArtboard?.id), bytes = async (blob: Blob) => new Uint8Array(await blob.arrayBuffer());
+      const data = format.id === 'export' ? new Blob([drawingSVG(doc, area)], { type: format.mime })
+        : format.id === 'export-pdf' ? new Blob([drawingPDF(doc, artboards.length ? artboards : area, await pdfImages(doc)) as BlobPart], { type: format.mime })
+        : format.id === 'export-ora' ? new Blob([await drawingOpenRaster(doc, area) as BlobPart], { type: format.mime })
+        : format.id === 'export-psd' ? new Blob([await drawingPSD(doc, area) as BlobPart], { type: format.mime })
+        : format.id === 'export-pages' ? new Blob([storedZip(await Promise.all((artboards.length ? artboards : [{ ...area, name: name }]).map(async (b, i) => ({ name: `${String(i + 1).padStart(2, '0')} ${b.name.replace(/[\\/:*?"<>|]/g, '-')}.png`, data: await bytes(await rasterBlob(doc, 'image/png', b)) })))) as BlobPart], { type: format.mime })
+        : await rasterBlob(doc, format.mime as 'image/png' | 'image/jpeg' | 'image/webp', area);
       const url = URL.createObjectURL(data), a = document.createElement('a'); a.href = url; a.download = `${name}.${format.extension}`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(format.id === 'export-pdf' && doc.layers.some(l => l.visible && (l.pixels || l.adjust || hasEffects(l.effects))) ? 'Exported as PDF without pixel layers, layer effects or adjustments: PDF export is vector only for now. PNG and OpenRaster include them.'
-        : `${doc.infinite ? 'Drawing' : 'Artboard'} exported as ${format.extension.toUpperCase()}.`);
+      const what = format.id === 'export-pages' ? `${artboards.length || 1} artboard${artboards.length > 1 ? 's' : ''}` : format.id === 'export-pdf' && artboards.length > 1 ? `${artboards.length} artboards` : artboards.length > 1 ? currentArtboard!.name : doc.infinite ? 'Drawing' : 'Artboard';
+      setNotice(format.id === 'export-pdf' && doc.layers.some(l => l.visible && (l.adjust || (l.kind !== 'pixel' && hasEffects(l.effects)))) ? `${what} exported as PDF without adjustment layers and without effects on vector layers. PNG and OpenRaster include them.`
+        : `${what} exported as ${format.extension.toUpperCase()}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Export failed.'); }
   };
   const save = () => { const text = documentText; download(text, `${name}.aethersketch`, 'application/json'); setSaved(text); setNotice('Drawing downloaded.'); };
@@ -441,7 +455,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const newDrawing=()=>{void beginDocument(()=>{history.open(newDocument());setName('Untitled');setSelected([]);setContour(0);setInsideID(null);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));};
   const fileActions = <MenuButton label="Document controls" items={[
         {id:'new',label:'New drawing',icon:<AetherIcon name="plus"/>},{id:'open',label:'Open drawing…',icon:<AetherIcon name="folder"/>},
-        {id:'import',label:'Import SVG…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},...EXPORTS.map(f=>({id:f.id,label:f.label,icon:<AetherIcon name="export"/>})),
+        {id:'import',label:'Import SVG or PSD…',icon:<AetherIcon name="import"/>},{id:'save',label:'Save drawing',icon:<AetherIcon name="save"/>},...EXPORTS.map(f=>({id:f.id,label:f.label,icon:<AetherIcon name="export"/>})),
         {id:'undo',label:'Undo',disabled:!history.canUndo,separatorBefore:true},{id:'redo',label:'Redo',disabled:!history.canRedo},
       ]} onSelect={id=>{if(id==='new')newDrawing();else runCommand(id);}}><AetherIcon name="menu"/></MenuButton>;
   const searchCommands = [
@@ -463,7 +477,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'rotate-left', label: 'Rotate canvas left 15°', category: 'View' }, { id: 'rotate-right', label: 'Rotate canvas right 15°', category: 'View' }, { id: 'rotate-reset', label: 'Reset canvas rotation', category: 'View', disabled: !camera.rotation },
     { id: 'save', label: 'Save drawing', category: 'File' }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, category: 'File' })), ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
-    { id: 'import', label: 'Import SVG…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
+    { id: 'import', label: 'Import SVG or PSD…', category: 'File' }, { id: 'undo', label: 'Undo', category: 'Edit', disabled: !history.canUndo }, { id: 'redo', label: 'Redo', category: 'Edit', disabled: !history.canRedo },
   ];
   const runCommand = (id: string) => { if (id === 'open') file.current?.click(); else if (id === 'save') save(); else if (id === 'import') svgFile.current?.click(); else if (id === 'undo') undo(); else if (id === 'redo') redo(); else editCommand(id); };
   const boardKeys = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -492,8 +506,16 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
         }} />
     : <p className="sketch-drive-note">Connect to Aether Studio to browse Drive.</p>;
   return <>
-    <input hidden ref={svgFile} type="file" accept=".svg,image/svg+xml" aria-label="Import SVG file" onChange={async e => {
+    <input hidden ref={svgFile} type="file" accept=".svg,image/svg+xml,.psd,image/vnd.adobe.photoshop" aria-label="Import SVG or PSD file" onChange={async e => {
       const input=e.currentTarget, f=input.files?.[0]; if(!f)return;
+      if (/\.psd$/i.test(f.name) || f.type === 'image/vnd.adobe.photoshop') {
+        // A Photoshop file comes in as pixel layers above the current ones; an empty drawing takes its size as the artboard.
+        try { const imported = await importPSD(new Uint8Array(await f.arrayBuffer()));
+          commit(d => ({ ...d, ...(!d.layers.some(l => l.paths.length || l.pixels) ? { widthPx: imported.doc.widthPx, heightPx: imported.doc.heightPx, infinite: false, artboards: undefined } : {}), layers: [...imported.doc.layers, ...d.layers.filter(l => l.paths.length || l.pixels || d.layers.some(x => x.paths.length || x.pixels))] }));
+          setLayerID(imported.doc.layers[0].id); select([]); chooseTool('select');
+          setNotice(`Photoshop file imported as ${imported.doc.layers.length} pixel layer${imported.doc.layers.length === 1 ? '' : 's'}.${imported.warnings.length ? ` ${imported.warnings.join(' ')}` : ''}`);
+        } catch (error) { setNotice(error instanceof Error ? error.message : 'Photoshop import failed.'); } input.value = ''; return;
+      }
       try { const imported=importSVG(await f.text());
         commit(d=>({...d,...(!d.layers.some(l=>l.paths.length||l.pixels)?{widthPx:imported.doc.widthPx,heightPx:imported.doc.heightPx}:{}),layers:[...imported.doc.layers,...d.layers]}));
         setLayerID(imported.doc.layers[0].id);select(imported.doc.layers[0].paths.filter(p=>!p.hidden).map(p=>p.id));chooseTool('select');
@@ -573,7 +595,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           tabs={[{ id: 'drawing', label: name, detail: `Aether Sketch · ${doc.layers.length} layer${doc.layers.length === 1 ? '' : 's'}${board.length ? ` · ${board.length} board item${board.length === 1 ? '' : 's'}` : ''}`, icon: <AetherIcon name="file-sketch" />, current: true }]}
           onAdd={newDrawing} onReorder={() => {}} onDetach={() => {}} /> }, drive, onFiles: files => void attach(files, screenToWorld(camera, { x: 160, y: 160 })) }}
       objectTabs={{
-        inspector: <SelectionInspector paths={chosen} board={chosenBoard} layer={layer} />,
+        inspector: <div className="sketch-properties"><ArtboardPanel doc={doc} currentID={currentArtboard?.id} onCurrent={setArtboardID} commit={commit} /><SymbolPanel doc={doc} layer={layer} selected={chosen} disabled={layer.locked || !layer.visible} centre={viewCentre} commit={commit} onSelect={ids => { setSelected(ids); setNode(null); }}
+          onPlace={paths => { add(paths); setSelected(paths.map(p => p.id)); setNode(null); chooseTool('select'); }} /><SelectionInspector paths={chosen} board={chosenBoard} layer={layer} /></div>,
         properties: <div className="sketch-properties">{chosenBoard.length > 0 && <BoardInspector items={chosenBoard} onChange={next => changeBoard(board.map(i => next.find(n => n.id === i.id) ?? i))}
           onDelete={() => { changeBoard(board.filter(i => !boardSelection.includes(i.id) && !(i.kind === 'connector' && (boardSelection.includes(i.from ?? '') || boardSelection.includes(i.to ?? ''))))); setBoardSelection([]); }} />}
         <div className="sketch-tool-settings">{chosen.length===1 && chosen[0].text && <TextInspector path={chosen[0]} disabled={disabled} onChange={p=>replace([p])} />}<GuidePanel guides={guides} onChange={setGuides} /><strong>{isBoardTool(tool) ? boardTools.find(t => t.id === tool)?.label : TOOL_INFO[tool].label.replace(/ \(.*\)$/, '')}</strong>
@@ -589,7 +612,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
             {shapeKind.amount && <FieldRow label={shapeKind.amount.label}><Slider min={shapeKind.amount.min} max={shapeKind.amount.max} step={shapeKind.amount.step} unit={shapeKind.amount.unit} value={shapeAmount} onChange={value => setShapeAmounts(a => ({ ...a, [shapeKind.id]: value }))} ariaLabel={shapeKind.amount.label} /></FieldRow>}</>}
           {tool === 'corner' && <><FieldRow label="Radius"><NumberField aria-label="Corner radius" value={corner.radius} min={.1} max={10000} unit="px" onCommit={radius => setCorner(c => ({ ...c, radius }))} /></FieldRow>
             <FieldRow label="Corner"><SelectField aria-label="Corner style" value={corner.style} options={[{ value: 'round', label: 'Rounded' }, { value: 'straight', label: 'Straight (chamfer)' }]} onChange={event => setCorner(c => ({ ...c, style: event.target.value as CornerStyle }))} /></FieldRow>
-            <Button disabled={disabled || !chosen.some(p => !p.text)} onClick={() => replace(chosen.map(p => p.text ? p : roundAllCorners(p, corner.radius, corner.style)))}>Apply to every corner</Button></>}
+            <Button disabled={disabled || !chosen.some(isGeometry)} onClick={() => replace(chosen.map(p => !isGeometry(p) ? p : roundAllCorners(p, corner.radius, corner.style)))}>Apply to every corner</Button></>}
           {tool === 'eraser' && <FieldRow label="Size"><Slider min={2} max={400} value={brush.eraserPx} unit="px" onChange={eraserPx => setBrush(b => ({ ...b, eraserPx }))} ariaLabel="Eraser size" /></FieldRow>}
           {(tool === 'polygon' || tool === 'star') && <FieldRow label="Points"><Slider min={3} max={32} value={sides} onChange={setSides} ariaLabel="Polygon sides" /></FieldRow>}
           <details className="sketch-tool-help"><summary>Tool tips</summary><p>{tool === 'shape' ? 'Pick a shape, then drag a box to draw it; Shift keeps it square. Set its one option first. The result is an ordinary path you can edit with nodes.'
@@ -617,7 +640,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
         toggles: GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, icon: g.icon, pressed: g.id === 'steady' ? guides.steady !== undefined : !!guides[g.id] })),
-        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, icon: <AetherIcon name="sparkles" /> })), { id: 'import', label: 'Import SVG…', icon: <AetherIcon name="import" /> },
+        windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, icon: <AetherIcon name="sparkles" /> })), { id: 'import', label: 'Import SVG or PSD…', icon: <AetherIcon name="import" /> },
           { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, icon: <AetherIcon name="export" /> }))] }}
       environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
         actions: [{ id: 'board', label: 'Board: notes, text boxes, tables, connectors, images', icon: <AetherIcon name="notes" />, pressed: isBoardTool(tool),
@@ -634,7 +657,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' || tool === 'hand' || tool === 'zoom' ? tool : `vector:${tool}`} hostTools={HOST_TOOLS}
           onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, screenToWorld(camera, { x: 160, y: 160 }))}
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
-          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides}
+          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides} artboardID={currentArtboard?.id}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
         makeShape={box => makeShape(shapeKind.id, box, shapeAmount)} cornerStyle={corner.style} onKnife={knife} select={pixelSelect} pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
         openPixels={() => pixelQueue.current.then(() => docRef.current.layers.find(l => l.id === layer.id)?.pixels)} onSmudged={(layerID, stroke) => editPixels(layerID, [], async () => ({ bitmap: await stroke.encode() }))}

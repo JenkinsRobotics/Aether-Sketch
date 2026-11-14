@@ -4,7 +4,7 @@ import type { BoardItem } from './board';
 import type { DrawingPath, Layer } from './document';
 
 const round = (n: number) => Math.round(n * 10) / 10;
-const pathKind = (p: DrawingPath) => p.text ? 'Text' : p.subpaths?.length ? 'Compound path' : p.closed ? 'Closed path' : 'Open path';
+const pathKind = (p: DrawingPath) => p.symbolID ? 'Symbol instance' : p.text ? 'Text' : p.subpaths?.length ? 'Compound path' : p.closed ? 'Closed path' : 'Open path';
 
 /** Read-only facts about the selection: what it is, where it sits and how big it is. */
 export function SelectionInspector({ paths, board, layer }: { paths: DrawingPath[]; board: BoardItem[]; layer: Layer }) {
@@ -19,6 +19,6 @@ export function SelectionInspector({ paths, board, layer }: { paths: DrawingPath
       <FieldRow label="Position"><span>{round(b.x)}, {round(b.y)} px</span></FieldRow>
       <FieldRow label="Size"><span>{round(b.width)} × {round(b.height)} px</span></FieldRow>
     </>}
-    {paths.length === 1 && !paths[0].text && <FieldRow label="Anchors"><span>{paths[0].points.length + (paths[0].subpaths ?? []).reduce((n, s) => n + s.points.length, 0)}</span></FieldRow>}
+    {paths.length === 1 && !paths[0].text && !paths[0].symbolID && <FieldRow label="Anchors"><span>{paths[0].points.length + (paths[0].subpaths ?? []).reduce((n, s) => n + s.points.length, 0)}</span></FieldRow>}
   </div>;
 }
