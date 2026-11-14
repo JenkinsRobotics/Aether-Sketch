@@ -12,7 +12,13 @@ export type BlendMode = typeof BLEND_MODES[number];
 /** A pixel layer's bitmap: a PNG covering `width`×`height` document pixels from (`x`, `y`). */
 export interface PixelBitmap { x: number; y: number; width: number; height: number; src: string }
 /** A layer holds vector paths, or (`kind: 'pixel'`) one bitmap and no paths. `pixels` is absent until something is painted. */
-export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode; kind?: 'pixel'; pixels?: PixelBitmap }
+/** Layer effects, in document pixels: `blurPx` softens the whole layer, a shadow is offset, a glow is not. */
+export interface LayerEffects { blurPx?: number; shadow?: { dxPx: number; dyPx: number; blurPx: number; color: string; opacity: number }; glow?: { blurPx: number; color: string; opacity: number } }
+/** What an adjustment layer does to the picture beneath it. Each amount runs -1 to 1 and 0 changes nothing; hue is in degrees. */
+export interface Adjustment { brightness: number; contrast: number; saturation: number; hueDeg: number; invert?: boolean }
+/** `role`: a `clip` layer shows only where the layer below it is painted; a `mask` layer is not drawn and hides the layer below wherever the mask is painted. Either needs a layer below.
+ * `adjust` recolours everything beneath the layer (only the layer below when the layer is also a clip). */
+export interface Layer { groups?: PathGroup[]; id: string; name: string; visible: boolean; locked: boolean; paths: DrawingPath[]; opacity?: number; blend?: BlendMode; kind?: 'pixel'; pixels?: PixelBitmap; role?: 'clip' | 'mask'; effects?: LayerEffects; adjust?: Adjustment }
 /** `board` (optional) holds the Freeform-style items on the infinite canvas; older drawings have none.
  * `infinite` drawings have no artboard: exports frame whatever is drawn. Older drawings keep their artboard. */
 export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean }
@@ -61,6 +67,16 @@ export function readDocument(text: string): SketchDocument {
       check(typeof b.src === 'string' && b.src.startsWith('data:image/png;base64,') && /^[A-Za-z0-9+/]+=*$/.test(b.src.slice(22)));
     }
     check(layer.opacity === undefined || number(layer.opacity, 0, 1)); check(layer.blend === undefined || BLEND_MODES.includes(layer.blend));
+    check(layer.role === undefined || layer.role === 'clip' || layer.role === 'mask');
+    const hex = (v: unknown) => typeof v === 'string' && /^#[\da-f]{6}$/i.test(v);
+    if (layer.effects !== undefined) {
+      const e = layer.effects; check(e && typeof e === 'object' && (e.blurPx === undefined || number(e.blurPx, 0, 500)));
+      for (const soft of [e.shadow, e.glow]) check(soft === undefined || (soft && typeof soft === 'object' && number(soft.blurPx, 0, 500) && hex(soft.color) && number(soft.opacity, 0, 1)));
+      check(e.shadow === undefined || (number(e.shadow.dxPx, -5000, 5000) && number(e.shadow.dyPx, -5000, 5000)));
+    }
+    if (layer.adjust !== undefined) {
+      const a = layer.adjust; check(a && typeof a === 'object' && ['brightness', 'contrast', 'saturation'].every(key => number(a[key], -1, 1)) && number(a.hueDeg, -180, 180) && (a.invert === undefined || typeof a.invert === 'boolean'));
+    }
     check(layer.groups === undefined || (Array.isArray(layer.groups) && layer.groups.length <= 10000));
     for (const group of layer.groups ?? []) { check(group && typeof group === 'object'); id(group.id); check(typeof group.name === 'string' && group.name.length <= 200); }
     const groups = new Map<string, PathGroup>((layer.groups ?? []).map((g: PathGroup) => [g.id, g]));

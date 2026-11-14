@@ -1,9 +1,11 @@
 import { memo, useState } from 'react';
-import { AetherIcon, IconButton, LayerStack, TreePanel, type TreeNode } from '@aether/ui';
+import { AetherIcon, IconButton, LayerStack, ToolIcon, TreePanel, type TreeNode } from '@aether/ui';
 import { pathBounds, pathData } from '@aether/sketch';
 import { ancestors, canMergeDown, duplicateLayer, groupPaths, mergeDown, pathLocked, pathVisible, moveTreeItem } from './structure';
 import { newLayer, newPixelLayer, type SketchDocument, type Layer } from './document';
 import type { BoardItem } from './board';
+import { layerDepths } from './depth';
+import { NO_ADJUSTMENT } from './LayerDepthPanel';
 
 /** Tree id of the Board section: notes, text boxes, tables and media beside the drawing. */
 export const BOARD_NODE = 'aether-sketch-board';
@@ -27,7 +29,9 @@ const LayerThumbnail = memo(function LayerThumbnail({ layer }: { layer: Layer })
   </svg>;
 });
 
-export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard, pixel = false }: {
+export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelection = [], onSelectBoard, onDeleteBoard, pixel = false, onMergeDown }: {
+  /** Merging that may need pixels rendered; without it only vector layers merge. */
+  onMergeDown?: (id: string) => void;
   /** New layers are pixel layers (the Pixel workspace) instead of vector layers. */
   pixel?: boolean; doc: SketchDocument; layer: Layer; selected: string[]; onSelect: (layerID: string, ids: string[]) => void;
   commit: (change: (doc: SketchDocument) => SketchDocument) => void;
@@ -45,7 +49,14 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     const owner = locate(id); if (!owner) return;
     if (action === 'rename' && value === undefined) { setRenaming(id); return; }
     if (owner.id === id && action === 'duplicate') { commit(d => duplicateLayer(d, id)); return; }
-    if (owner.id === id && action === 'merge-down') { commit(d => mergeDown(d, id)); return; }
+    if (owner.id === id && action === 'merge-down') { if (onMergeDown) onMergeDown(id); else commit(d => mergeDown(d, id)); return; }
+    if (owner.id === id && action === 'toggle-clip') { commit(d => ({ ...d, layers: d.layers.map(l => l.id === id ? { ...l, role: l.role === 'clip' ? undefined : 'clip' as const } : l) })); return; }
+    if (owner.id === id && (action === 'add-mask' || action === 'add-adjustment')) {
+      // Both go directly above the layer they act on. A mask is a pixel or vector layer like any other: paint or draw on it to hide.
+      const added: Layer = action === 'add-mask' ? { ...(pixel ? newPixelLayer : newLayer)(`Mask of ${owner.name}`.slice(0, 200)), role: 'mask' } : { ...newLayer('Adjustment'), adjust: NO_ADJUSTMENT };
+      commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === id)); return { ...d, layers: [...d.layers.slice(0, at), added, ...d.layers.slice(at)] }; });
+      onSelect(added.id, []); return;
+    }
     commit(d => {
       if (action === 'delete' && owner.id === id && !owner.locked && d.layers.length > 1) return { ...d, layers: d.layers.filter(l => l.id !== id) };
       return { ...d, layers: d.layers.map(l => {
@@ -75,7 +86,10 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     const rank = (id: string) => Math.max(-1, ...l.paths.map((p, i) => p.id === id || ancestors(l, p.groupID).some(g => g.id === id) ? i : -1));
     return rank(b.id) - rank(a.id);
   });
-  const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: <AetherIcon name={l.kind === 'pixel' ? 'image' : 'layers'} />, badge: l.kind === 'pixel' ? 'px' : String(l.paths.length), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
+  const depths = layerDepths(doc), roleOf = (l: Layer) => depths[doc.layers.indexOf(l)]?.role;
+  const kindLabel = (l: Layer) => [roleOf(l), l.adjust ? 'adjust' : ''].filter(Boolean).join(' · ');
+  const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: roleOf(l) === 'mask' ? <ToolIcon name="mask" /> : <AetherIcon name={l.adjust ? 'sliders' : l.kind === 'pixel' ? 'image' : 'layers'} />,
+    badge: [kindLabel(l), l.kind === 'pixel' ? 'px' : l.adjust && !l.paths.length ? '' : String(l.paths.length)].filter(Boolean).join(' · '), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
   // Board items draw above every layer, so their section leads the tree, newest first.
   if (board.length) nodes.unshift({ id: BOARD_NODE, label: 'Board', icon: <AetherIcon name="notes" />, badge: String(board.length),
     children: [...board].reverse().map(item => ({ id: item.id, label: boardLabel(item), icon: <AetherIcon name={BOARD_ICON[item.kind] ?? 'rectangle'} /> })) });
@@ -84,15 +98,19 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     (treeOwner.groups?.some(g => g.id === treeSelection) && groupPaths(treeOwner, treeSelection).every(p => selected.includes(p.id))) ||
     (!selected.length && treeSelection === layer.id));
   const current = boardSelection.length ? boardSelection[0] : treeMatches ? treeSelection : selected[0] ?? layer.id;
-  const highlighted = new Set(boardSelection.length ? boardSelection : selected.length ? selected : [layer.id]);
+  // A shape that landed as pixels leaves its id selected with nothing to show for it; the layer is what is current then.
+  const highlighted = new Set(boardSelection.length ? boardSelection : selected.some(id => layer.paths.some(p => p.id === id)) ? selected : [layer.id]);
   if (treeMatches) highlighted.add(treeSelection);
   const newLayerControl = { id: 'add', label: pixel ? 'New pixel layer' : 'New layer', icon: <AetherIcon name="plus" />, onClick: () => { const l = (pixel ? newPixelLayer : newLayer)(`Layer ${doc.layers.length + 1}`); commit(d => ({ ...d, layers: [l, ...d.layers] })); onSelect(l.id, []); } };
-  if (view === 'previews') return <LayerStack ariaLabel="Drawing layers" selectedID={layer.id} footer={footer} controls={[newLayerControl,
+  const depthControls = [
+    { id: 'add-mask', label: 'Add a mask to this layer', icon: <ToolIcon name="mask" />, disabled: roleOf(layer) === 'mask', onClick: () => command(layer.id, 'add-mask') },
+    { id: 'add-adjustment', label: 'New adjustment layer', icon: <AetherIcon name="sliders" />, onClick: () => command(layer.id, 'add-adjustment') }];
+  if (view === 'previews') return <LayerStack ariaLabel="Drawing layers" selectedID={layer.id} footer={footer} controls={[newLayerControl, ...depthControls,
       { id: 'duplicate', label: 'Duplicate layer', icon: <AetherIcon name="duplicate" />, onClick: () => command(layer.id, 'duplicate') },
       { id: 'merge', label: 'Merge down', icon: <AetherIcon name="merge" />, disabled: !canMergeDown(doc, layer.id), onClick: () => command(layer.id, 'merge-down') },
       { id: 'delete', label: 'Delete layer', icon: <AetherIcon name="delete" />, disabled: doc.layers.length <= 1 || layer.locked, onClick: () => command(layer.id, 'delete') }]}
     layers={doc.layers.map(l => ({ id: l.id, label: l.name, visible: l.visible, locked: l.locked, thumbnail: <LayerThumbnail layer={l} />,
-      detail: [l.blend && l.blend !== 'normal' ? l.blend.replace('-', ' ') : '', (l.opacity ?? 1) < 1 ? `${Math.round((l.opacity ?? 1) * 100)}%` : '', l.kind === 'pixel' ? 'Pixels' : `${l.paths.length} item${l.paths.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }))}
+      detail: [kindLabel(l), l.blend && l.blend !== 'normal' ? l.blend.replace('-', ' ') : '', (l.opacity ?? 1) < 1 ? `${Math.round((l.opacity ?? 1) * 100)}%` : '', l.kind === 'pixel' ? 'Pixels' : `${l.paths.length} item${l.paths.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ') }))}
     onSelect={id => onSelect(id, [])} onToggleVisible={id => command(id, 'visibility')} onToggleLock={id => command(id, 'lock')}
     onMove={(source, target, position) => commit(d => moveTreeItem(d, source, target, position))} />;
   return <TreePanel title="Layers" ariaLabel="Drawing layers" footer={footer} nodes={nodes} selectedIDs={highlighted}
@@ -105,9 +123,10 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     renamingID={renaming} onRename={(id, value) => command(id, 'rename', value)} onCancelRename={() => setRenaming(null)} onAction={(id, action) => command(id, action)}
     onMove={(source, target, position) => { if (![source, target].some(id => id === BOARD_NODE || boardIDs.has(id))) commit(d => moveTreeItem(d, source, target, position)); }}
     menuItems={id => id === BOARD_NODE || boardIDs.has(id) ? [{ id: 'delete', label: id === BOARD_NODE ? 'Delete all board items' : 'Delete' }] : [{ id: 'rename', label: 'Rename' }, { id: 'visibility', label: 'Toggle visibility' }, { id: 'lock', label: 'Toggle lock' },
-      ...(locate(id)?.id === id ? [{ id: 'duplicate', label: 'Duplicate layer' }, { id: 'merge-down', label: 'Merge down', disabled: !canMergeDown(doc, id) }] : []), { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
+      ...(locate(id)?.id === id ? [{ id: 'duplicate', label: 'Duplicate layer' }, { id: 'merge-down', label: 'Merge down', disabled: !canMergeDown(doc, id) },
+        { id: 'add-mask', label: 'Add mask', disabled: roleOf(locate(id)!) === 'mask' }, { id: 'toggle-clip', label: locate(id)!.role === 'clip' ? 'Release clipping' : 'Clip to layer below', disabled: doc.layers.at(-1)?.id === id }, { id: 'add-adjustment', label: 'New adjustment layer above' }] : []), { id: 'delete', label: 'Delete', disabled: locate(id)?.id === id && (doc.layers.length <= 1 || !!locate(id)?.locked) }]}
     onCommand={command} controls={[
-      newLayerControl,
+      newLayerControl, ...depthControls,
       { id: 'rename', label: 'Rename item', icon: <AetherIcon name="pencil" />, onClick: () => setRenaming(current), shortcut: 'F2' },
       { id: 'delete', label: 'Delete item', icon: <AetherIcon name="delete" />, onClick: () => command(current, 'delete'), shortcut: 'Delete' },
     ]} />;

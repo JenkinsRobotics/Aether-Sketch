@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { newDocument, newLayer, readDocument, serializeDocument, type DrawingPath } from './document';
-import { canMergeDown, duplicateLayer, groupSelection, mergeDown, ungroupSelection, pathLocked, pathVisible, moveTreeItem, groupPaths } from './structure';
+import { canMergeDown, mergeKind, duplicateLayer, groupSelection, mergeDown, ungroupSelection, pathLocked, pathVisible, moveTreeItem, groupPaths } from './structure';
 const path = (id: string): DrawingPath => ({ id, points: [[0, 0], [100, 0], [100, 100]], closed: true, color: '#123456', fill: '#abcdef', widthPx: 3, opacity: .7, nodeModes: ['corner', 'smooth', 'symmetric'] });
 it('groups a selection into a contiguous paint block without flattening nested groups', () => {
   const layer = { ...newDocument().layers[0], paths: ['a', 'b', 'c', 'd'].map(path) };
@@ -49,5 +49,7 @@ it('duplicates a layer above itself with fresh ids, and merges a layer down', ()
   expect(copy.layers[0].paths[0]).toMatchObject({ id: 'id1', groupID: 'id0' }); expect(copy.layers[0].groups![0].id).toBe('id0');
   const merged = mergeDown(doc, top.id);
   expect(merged.layers.map(l => l.name)).toEqual(['Layer 1']); expect(merged.layers[0].paths[0].opacity).toBeCloseTo(.4);
-  expect(canMergeDown({ ...doc, layers: [{ ...top, blend: 'multiply' }, doc.layers[1]] }, top.id)).toBe(false);
+  // A blended layer cannot stay vectors, so it merges as pixels; a locked one does not merge.
+  expect(mergeKind({ ...doc, layers: [{ ...top, blend: 'multiply' }, doc.layers[1]] }, top.id)).toBe('pixel');
+  expect(canMergeDown({ ...doc, layers: [{ ...top, locked: true }, doc.layers[1]] }, top.id)).toBe(false);
 });

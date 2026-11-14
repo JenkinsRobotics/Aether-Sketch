@@ -4,6 +4,7 @@ import { dashArray, drawnParts } from './vector';
 import { ancestors, pathLocked, pathVisible } from './structure';
 import type { DrawingPath, Layer, SketchDocument } from './document';
 import { pixelBounds, unionRect } from './pixels';
+import { composeLayers, depthAttributes, depthDefs, depthRegion, effectReach, layerDepths, layerDOMID, usesDepth, type Depth } from './depth';
 export const paintKeys = ['color', 'fill', 'widthPx', 'opacity', 'fillGradient', 'fillOpacity', 'strokeOpacity', 'strokeEnabled', 'lineCap', 'lineJoin', 'dash', 'dashPx', 'arrowStart', 'arrowEnd', 'widthProfile'] as const;
 export type PaintStyle = Pick<DrawingPath, typeof paintKeys[number]>;
 export const defaultPaint: PaintStyle = { color: '#2368ce', fill: '#bcd4f5', widthPx: 3, opacity: 1, fillOpacity: 1, strokeOpacity: 1, strokeEnabled: true, lineCap: 'round', lineJoin: 'round', dash: 'solid' };
@@ -66,9 +67,11 @@ const attributeNames: Record<string, string> = { fillRule: 'fill-rule', fillOpac
 const xmlText = (value: string) => value.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 /** What an export frames: the artboard, or for an infinite drawing everything drawn, with a small margin. */
 export function exportArea(doc: SketchDocument) {
-  const drawn = doc.infinite ? unionRect(pathBounds(doc.layers.filter(l => l.visible).flatMap(l => l.paths.filter(p => pathVisible(l, p)))), pixelBounds(doc.layers)) : null;
+  // Working masks are not part of the picture; shadows and glows are.
+  const depths = layerDepths(doc), seen = doc.layers.filter((_, i) => depths[i].drawn);
+  const drawn = doc.infinite ? unionRect(pathBounds(seen.flatMap(l => l.paths.filter(p => pathVisible(l, p)))), pixelBounds(seen)) : null;
   if (!drawn) return { x: 0, y: 0, width: doc.widthPx, height: doc.heightPx };
-  const margin = Math.max(drawn.width, drawn.height) * .02, x = drawn.x - margin, y = drawn.y - margin;
+  const margin = Math.max(drawn.width, drawn.height) * .02 + Math.max(0, ...seen.map(l => effectReach(l.effects))), x = drawn.x - margin, y = drawn.y - margin;
   return { x, y, width: Math.max(drawn.width + margin * 2, 1e-6), height: Math.max(drawn.height + margin * 2, 1e-6) };
 }
 /** Standard SVG. Each layer is an Inkscape layer (name, hidden state, opacity, blend), so layers survive a round trip through Inkscape. */
@@ -77,7 +80,8 @@ export function blurRegion(p: DrawingPath) {
   const b = pathBounds([p]) ?? { x: 0, y: 0, width: 0, height: 0 }, pad = (p.blurPx ?? 0) * 3;
   return { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
 }
-export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string {
+/** `only` limits the picture to those layers (by id), still clipped and masked as they are in the whole drawing. */
+export function drawingSVG(doc: SketchDocument, area = exportArea(doc), only?: readonly string[]): string {
   const ids = paintIDs(doc), all = doc.layers.flatMap(l => l.paths);
   const defs = all.map(p => {
     const id = ids.get(p.id)!, g = p.fillGradient;
@@ -88,17 +92,30 @@ export function drawingSVG(doc: SketchDocument, area = exportArea(doc)): string 
     const position = g.kind === 'linear' ? Object.entries(gradientVector(g.angleDeg)).map(([k, v]) => `${k}="${v}"`).join(' ') : 'cx="0.5" cy="0.5" r="0.5"';
     return clip + blur + `<${tag} id="${id}-gradient" ${position}>${g.stops.map(s => `<stop offset="${s.offset}" stop-color="${s.color}" stop-opacity="${s.opacity}"/>`).join('')}</${tag}>`;
   }).join('');
-  const body = [...doc.layers].reverse().map((l, index) => {
-    const shown = { ...l, visible: true };
-    const markup = l.paths.filter(p => pathVisible(shown, p)).map(p => {
+  const depths = layerDepths(doc), region = usesDepth(doc) ? depthRegion(doc) ?? area : null;
+  const inPicture = (index: number) => !only || only.includes(doc.layers[index].id);
+  // Content other layers point at carries an id: clip bases, and the mask layers of anything shown.
+  const bases = new Set(depths.flatMap((d, i) => inPicture(i) && d.clipTo !== undefined ? [d.clipTo] : []));
+  const shown = (index: number) => inPicture(index) || bases.has(index);
+  const content = (l: Layer, d: Depth) => {
+    const markup = l.paths.filter(p => pathVisible({ ...l, visible: true }, p)).map(p => {
       const attributes = (path: DrawingPath) => Object.entries(paintAttributes(path, `${ids.get(p.id)}-gradient`)).filter(([, value]) => value !== undefined).map(([key, value]) => `${attributeNames[key] ?? key}="${value}"`).join(' ');
       const parts = drawnParts(p).map(part => `<path d="${pathData(part)}" ${attributes(part)}/>`).join('');
       return clipPaths(l, p).reduce((m, clip) => `<g clip-path="url(#${ids.get(clip.id)}-clip)">${m}</g>`, (p.text ? textSVG(p, attributes(p)) : parts));
     }).join('');
     const b = l.pixels, bitmap = b ? `<image href="${b.src}" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" preserveAspectRatio="none"/>` : '';
-    const style = [l.visible ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');
-    return `<g id="layer${index + 1}" inkscape:groupmode="layer" inkscape:label="${xmlText(l.name)}"${style ? ` style="${style}"` : ''}>${bitmap}${markup}</g>`;
-  }).join('');
+    const a = depthAttributes(l, d), named = a.hide || bases.has(d.index) || d.role === 'mask';
+    // A mask layer's own effects shape the mask: blurring it feathers the edge.
+    return named ? `<g id="${a.id}"${a.hide ? ` mask="${a.hide}"` : ''}${d.role === 'mask' && a.effects ? ` filter="${a.effects}"` : ''}>${bitmap}${markup}</g>` : bitmap + markup;
+  };
+  let count = 0;
+  const body = composeLayers(doc, depths, (l, d) => {
+    const a = depthAttributes(l, d), inner = a.effects ? `<g filter="${a.effects}">${content(l, d)}</g>` : content(l, d);
+    const style = [d.drawn ? '' : 'display:none', (l.opacity ?? 1) < 1 ? `opacity:${l.opacity}` : '', l.blend && l.blend !== 'normal' ? `mix-blend-mode:${l.blend}` : ''].filter(Boolean).join(';');
+    return `<g id="layer${++count}" inkscape:groupmode="layer" inkscape:label="${xmlText(l.name)}"${a.clip ? ` mask="${a.clip}"` : ''}${style ? ` style="${style}"` : ''}>${inner}</g>`;
+  }, (below, d) => `<g filter="url(#${layerDOMID(d.index)}-adjust)">${below.join('')}</g>`, inPicture).join('');
+  // Never drawn as themselves: mask layers, and clip bases left out of the picture.
+  const unseen = doc.layers.map((l, i) => (depths[i].role === 'mask' ? l.visible && shown(depths.findIndex(d => d.hide.includes(i))) : bases.has(i) && !inPicture(i)) ? content(l, depths[i]) : '').join('');
   const n = (v: number) => +v.toPrecision(10);
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${n(area.width)}" height="${n(area.height)}" viewBox="${n(area.x)} ${n(area.y)} ${n(area.width)} ${n(area.height)}"><defs>${defs}</defs>${body}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${n(area.width)}" height="${n(area.height)}" viewBox="${n(area.x)} ${n(area.y)} ${n(area.width)} ${n(area.height)}"><defs>${defs}${region ? depthDefs(doc, region, depths) : ''}${unseen}</defs>${body}</svg>`;
 }

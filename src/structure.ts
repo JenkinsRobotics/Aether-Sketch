@@ -1,4 +1,5 @@
-import type { DrawingPath, Layer, PathGroup, SketchDocument } from './document';
+import type { DrawingPath, Layer, PathGroup, PixelBitmap, SketchDocument } from './document';
+import { hasEffects, layerDepths, type Depth } from './depth';
 export function ancestors(layer: Layer, groupID?: string): PathGroup[] {
   const result: PathGroup[] = [], seen = new Set<string>();
   while (groupID && !seen.has(groupID)) { seen.add(groupID); const group = layer.groups?.find(g => g.id === groupID); if (!group) break; result.push(group); groupID = group.parentID; }
@@ -68,17 +69,43 @@ export function duplicateLayer(doc: SketchDocument, id: string, nextID: () => st
     paths: source.paths.map(p => ({ ...p, id: ids.get(p.id)!, groupID: p.groupID && ids.get(p.groupID) })) };
   return { ...doc, layers: [...doc.layers.slice(0, index), copy, ...doc.layers.slice(index)] };
 }
-/** Whether a layer can merge into the one below: both unlocked vector layers and the upper layer blends normally.
- * ponytail: pixel layers do not merge yet; composite the bitmaps (and rasterise vectors) when that is needed. */
-export const canMergeDown = (doc: SketchDocument, id: string) => {
+/** How a layer merges into the one below. Two vector layers merge as vectors when the upper one is plain (normal blend,
+ * no effects, masks or adjustment) and has the lower one's role. Anything else is flattened to pixels with all of that
+ * applied, and the result is a pixel layer. A layer above a masked layer merges into that layer, masks applied. Null when a layer is locked. */
+export function mergeKind(doc: SketchDocument, id: string): 'vector' | 'pixel' | null {
   const index = doc.layers.findIndex(l => l.id === id), upper = doc.layers[index], lower = doc.layers[index + 1];
-  return !!upper && !!lower && !upper.locked && !lower.locked && (upper.blend ?? 'normal') === 'normal' && upper.kind !== 'pixel' && lower.kind !== 'pixel';
-};
-/** Merge a layer into the one below. The upper layer's opacity is kept by folding it into its paths. */
+  if (!upper || !lower || upper.locked || lower.locked) return null;
+  const depths = layerDepths(doc), role = depths[index].role, below = depths[index + 1].role;
+  if (below === 'mask' && role !== 'mask') return doc.layers[mergeTarget(depths, index)]?.locked === false ? 'pixel' : null;
+  const plain = (upper.blend ?? 'normal') === 'normal' && !upper.adjust && !hasEffects(upper.effects) && !depths[index].hide.length && (!role || role === below);
+  return plain && upper.kind !== 'pixel' && lower.kind !== 'pixel' ? 'vector' : 'pixel';
+}
+/** The layer a merge lands on: the one below, or for a layer above another layer's masks, the layer they mask. */
+const mergeTarget = (depths: Depth[], index: number) => { let at = index + 1; if (depths[index].role !== 'mask') while (depths[at]?.role === 'mask') at++; return at; };
+export const canMergeDown = (doc: SketchDocument, id: string) => mergeKind(doc, id) !== null;
+/** Merge a vector layer into the vector layer below. The upper layer's opacity is kept by folding it into its paths. */
 export function mergeDown(doc: SketchDocument, id: string): SketchDocument {
-  if (!canMergeDown(doc, id)) return doc;
+  if (mergeKind(doc, id) !== 'vector') return doc;
   const index = doc.layers.findIndex(l => l.id === id), upper = doc.layers[index], lower = doc.layers[index + 1], fade = upper.opacity ?? 1;
   const merged: Layer = { ...lower, groups: [...(lower.groups ?? []), ...(upper.groups ?? [])],
     paths: [...lower.paths, ...upper.paths.map(p => ({ ...p, opacity: p.opacity * fade, hidden: p.hidden || !upper.visible || undefined }))] };
   return { ...doc, layers: [...doc.layers.slice(0, index), merged, ...doc.layers.slice(index + 2)] };
+}
+/** What flattening a layer into the one below needs: the drawing to render, the layers in that picture, and the layers that go away
+ * (the upper layer and the masks of both). The lower layer keeps its own opacity, blend, role and adjustment, so the picture is rendered without them. */
+export function flattenPlan(doc: SketchDocument, id: string) {
+  if (mergeKind(doc, id) !== 'pixel') return null;
+  const index = doc.layers.findIndex(l => l.id === id), depths = layerDepths(doc), target = mergeTarget(depths, index), kept = depths[target].role;
+  const plain = (l: Layer): Layer => { const { role: _role, ...rest } = l; return rest; };
+  const render: SketchDocument = { ...doc, layers: doc.layers.map((l, i) => i === target ? { ...(kept ? plain(l) : l), visible: true, opacity: 1, blend: undefined, adjust: undefined } : i === index && kept ? plain(l) : l) };
+  const masks = [...depths[index].hide, ...(target > index + 1 ? depths[target].hide : [])];
+  return { render, lowerID: doc.layers[target].id, only: [id, doc.layers[target].id], remove: [id, ...masks.map(i => doc.layers[i].id)] };
+}
+/** The drawing once the flattened picture has replaced the lower layer. */
+export function flattenInto(doc: SketchDocument, lowerID: string, remove: readonly string[], pixels: PixelBitmap | undefined): SketchDocument {
+  return { ...doc, layers: doc.layers.filter(l => !remove.includes(l.id)).map(l => {
+    if (l.id !== lowerID) return l;
+    const { groups: _groups, effects: _effects, pixels: _pixels, ...rest } = l;
+    return { ...rest, kind: 'pixel' as const, paths: [], ...(pixels ? { pixels } : {}) };
+  }) };
 }

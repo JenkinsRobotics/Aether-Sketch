@@ -143,6 +143,12 @@ async function encode(c: HTMLCanvasElement, rect: Rect): Promise<PixelBitmap> {
   surfaces.set(src, c); for (const key of surfaces.keys()) { if (surfaces.size <= 4) break; surfaces.delete(key); }
   return { ...rect, src };
 }
+/** A finished canvas, whose corner sits at `at`, as a layer bitmap cropped to what is painted. Null when nothing is. */
+export async function canvasBitmap(c: HTMLCanvasElement, at: { x: number; y: number }): Promise<PixelBitmap | null> {
+  const b = alphaBounds(context(c).getImageData(0, 0, c.width, c.height).data, c.width, c.height); if (!b) return null;
+  const crop = newCanvas(b.width, b.height); context(crop).drawImage(c, -b.x, -b.y);
+  return encode(crop, { x: at.x + b.x, y: at.y + b.y, width: b.width, height: b.height });
+}
 /** A canvas covering `rect` with the current bitmap already on it. */
 async function openSurface(current: PixelBitmap | undefined, rect: Rect): Promise<HTMLCanvasElement> {
   if (!current) return newCanvas(rect.width, rect.height);

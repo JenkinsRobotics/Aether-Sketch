@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } fr
 import type { ReactNode } from 'react';
 import { PaintDefinitions } from './PaintDefinitions';
 import { paintAttributes, clipPaths, paintIDs, type PaintStyle } from './paint';
+import { composeLayers, depthAttributes, depthDefs, depthRegion, layerDepths, layerDOMID, usesDepth } from './depth';
 import { pathContours, replaceContour, beginDraft, moveDraft, endDraft, finishPen, penPointerDown, previewShape, pathData,
   replacePathPoints, transformPath, splitPathEdge, nearestPathEdge, movePathControl,
   pathBounds, boundsContain, resizePoint, resizeBounds, rotatePoint, handlePoint, RESIZE_HANDLES,
@@ -388,6 +389,17 @@ export function SketchCanvas(props: Props) {
   const pin = 4 / scale();
   // World-space layer inside FreeformCanvas: one SVG unit is one canvas pixel, and the
   // camera transform above it makes getScreenCTM() map pointers straight to drawing units.
+  // ---- Layer depth: clips, masks, effects and adjustment layers are SVG masks and filters (depth.ts). ----
+  const depths = layerDepths(props.doc);
+  // Masks and filters cover everything drawn, including a path being dragged and paint still landing.
+  // ponytail: measured on every render while the drawing uses layer depth; cache it per document if drawings with thousands of paths drag slowly.
+  const region = usesDepth(props.doc) ? depthRegion(props.doc, [...props.doc.layers.map(l => preview.length ? { ...l, paths: l.paths.map(p => preview.find(v => v.id === p.id) ?? p) } : l), { ...props.doc.layers[0], pixels: undefined, effects: undefined, paths: props.pending.flatMap(q => q.paths) }]) ?? { x: 0, y: 0, width: 1, height: 1 } : null;
+  /** Every layer in drawing order, an adjustment layer wrapping what is beneath it. Working masks come last and unseen; the current one shows as a ghost so it can be edited. */
+  const stack = (draw: (l: Layer, a: ReturnType<typeof depthAttributes>, ghost: boolean) => ReactNode): ReactNode[] => [
+    ...composeLayers<ReactNode>(props.doc, depths, (l, d) => d.drawn ? draw(l, depthAttributes(l, d), false) : null,
+      (below, d) => <g key={`adjust-${props.doc.layers[d.index].id}`} data-adjusted-by={props.doc.layers[d.index].id} filter={`url(#${layerDOMID(d.index)}-adjust)`}>{below}</g>),
+    ...props.doc.layers.map((l, i) => depths[i].role === 'mask' && l.visible ? draw(l, depthAttributes(l, depths[i]), true) : null)];
+
   return <><svg ref={svg} className="sketch-canvas" aria-label="Sketch drawing canvas" tabIndex={0} width={1} height={1} overflow="visible"
       onPointerDown={down} onPointerMove={move}
       onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={() => { if (activePointer.current !== null) cancel(); }} onKeyDown={key}
@@ -402,7 +414,8 @@ export function SketchCanvas(props: Props) {
       <rect className="sketch-capture" x={-5e6} y={-5e6} width={1e7} height={1e7} fill="transparent" />
       {!props.doc.infinite && <rect className="sketch-artboard" width={props.doc.widthPx} height={props.doc.heightPx} fill="white" />}
       {props.snap.grid && !props.doc.infinite && <rect width={props.doc.widthPx} height={props.doc.heightPx} fill="url(#sketch-grid)" pointerEvents="none" />}
-      {[...props.doc.layers].reverse().filter(l => l.visible).map(l => <g key={l.id} data-layer-id={l.id} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none', opacity: l.opacity, mixBlendMode: l.blend }}>
+      {region && <defs dangerouslySetInnerHTML={{ __html: depthDefs(props.doc, region, depths) }} />}
+      {stack((l, a, ghost) => <g key={l.id} data-layer-id={l.id} data-layer-role={ghost ? 'mask' : undefined} mask={a.clip} style={{ pointerEvents: l.id === props.layer?.id && !l.locked ? 'auto' : 'none', opacity: ghost ? l.id === props.layer?.id ? .35 : 0 : l.opacity, mixBlendMode: ghost ? undefined : l.blend }}><g filter={ghost ? undefined : a.effects}><g id={a.id} mask={a.hide} filter={ghost ? a.effects : undefined}>
         {l.pixels && <image data-pixel-layer={l.id} href={l.pixels.src} x={l.pixels.x} y={l.pixels.y} width={l.pixels.width} height={l.pixels.height} preserveAspectRatio="none" pointerEvents="none" visibility={veiled === l.id ? 'hidden' : undefined} style={{ imageRendering: scale() >= 4 ? 'pixelated' : undefined }} />}
         {props.pending.filter(q => q.layerID === l.id).flatMap(q => q.paths).map(p => <path key={`pending-${p.id}`} data-pixel-pending="true" pointerEvents="none" d={pathData(p)}
           {...paintAttributes({ ...p, fill: p.fillGradient?.stops[0]?.color ?? p.fill, fillGradient: undefined, blurPx: undefined }, '')} style={p.blurPx ? { filter: `blur(${p.blurPx}px)` } : undefined} />)}
@@ -415,7 +428,7 @@ export function SketchCanvas(props: Props) {
         </g>;
           return <g key={p.id}>{clipPaths(l, p).reduce<ReactNode>((child, clip) => <g clipPath={`url(#${ids.get(clip.id)}-clip)`}>{child}</g>, content)}</g>;
         })}
-      </g>)}
+      </g></g></g>)}
       <GuideOverlay guides={props.drawGuides} scale={scale()} />
       {marquee && <rect {...marquee} className="sketch-marquee" pointerEvents="none" vectorEffect="non-scaling-stroke" />}
       {draft && brushing && !dab.current && <path className={`sketch-brush-preview${props.tool === 'eraser' ? ' sketch-eraser-preview' : ''}`} d={`M${strokeOutline().map(p => p.join(',')).join('L')}Z`} fill={props.tool === 'brush' ? props.paint.color : undefined} pointerEvents="none"

@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.25)
+## Where it stands (alpha-0.1.26)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -22,7 +22,7 @@ and eyedropper follow the current layer's kind.
 
 | | Pixel | Vector |
 |---|---|---|
-| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; ruler, ellipse, symmetry (mirror, flip, quad, radial), 1- and 2-point perspective, steady stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
+| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse, symmetry (mirror, flip, quad, radial), 1- and 2-point perspective, steady stroke | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
 | Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No layer effects, symbols or multiple artboards. No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
 
 Pixel layer limits in this release:
@@ -33,7 +33,16 @@ Pixel layer limits in this release:
   drawings up to 16 MB; the app warns from 12 MB.
 - SVG, PNG, JPEG, WebP and OpenRaster exports include pixel layers. PDF export is
   still vector only and says so.
-- Pixel layers do not merge down yet. Gradient fills land as their first colour.
+- Gradient fills land on pixel layers as their first colour.
+- Merge down keeps vectors only when both layers are plain vector layers. With a
+  pixel layer, a blend mode, a clip, a mask, effects or an adjustment involved, the
+  result is one pixel layer (up to 4096 px a side) with all of that applied.
+- Clips, masks, effects and adjustments are in SVG, PNG, JPEG, WebP and OpenRaster
+  exports (OpenRaster gets them applied to each layer's image; an adjustment layer
+  shows only in its merged image). PDF applies clips and masks made of vector
+  shapes; it leaves out effects and adjustments and says so.
+- A stroke being painted on a clipped, masked or effect layer shows plain until the
+  pen lifts. Shapes hidden by a mask can still be clicked.
 - A stroke in progress, and the layer being smudged, show above every layer until
   the pen lifts; then they take their place in the layer order.
 - A selection is a mask up to 4096 × 4096 px. It is not saved in the file; undo and
@@ -65,8 +74,16 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
    later, none of it blocking: a drag-to-merge shape builder, width from recorded
    pen pressure, live (re-editable) corners and shapes, a freehand knife, text on
    either side of its path. (Affinity Designer.)
-5. **Layer depth.** Masks, clipping layers, layer effects (shadow, glow, blur),
-   adjustment layers.
+5. **Layer depth.** Done in alpha-0.1.26, for pixel and vector layers alike:
+   clipping layers (a layer shows only where the layer below is painted), mask
+   layers (an ordinary layer that is not drawn and hides the layer below wherever
+   it is painted; hide it to switch the mask off, blur it to feather the mask),
+   a mask from the pixel selection, layer blur, drop shadow and glow, adjustment
+   layers (brightness, contrast, saturation, hue, invert; for everything beneath,
+   or for one layer when clipped), and Merge down for pixel layers. Left for
+   later: curves and levels, more effects (stroke, inner shadow), an adjustment
+   limited by its own mask, and clips, masks and effects on a stroke while it is
+   still being painted. (Fresco and Affinity masks, Affinity adjustments.)
 6. **Guides.** French curve, 3-point and fisheye perspective, predictive stroke,
    canvas rotation, isometric grids.
 7. **Document.** Multiple artboards, symbols, PSD import and export.

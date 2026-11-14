@@ -29,18 +29,20 @@ import { SketchCanvas, type BrushSettings, type EditorTool, type PixelSelect } f
 import { VectorInspector, type NodeSelection, type SnapSettings } from './VectorInspector';
 import { VectorPaintPanel } from './VectorPaintPanel';
 import { addInside, duplicatePaintSelection, copyPaint, defaultPaint, drawingSVG, repairClips, type PaintStyle } from './paint';
-import { drawingOpenRaster, drawingPDF, rasterBlob } from './export';
+import { drawingOpenRaster, drawingPDF, flattenLayers, rasterBlob } from './export';
 import { BRUSH_PRESETS } from './brush';
 import { BrushPanel } from './BrushPanel';
 import { SAMPLES } from './sample';
 import { ColourPanel } from './ColourPanel';
 import { GuidePanel } from './GuidePanel';
 import { symmetryCopies, type Guides } from './guides';
-import { ancestors } from './structure';
+import { ancestors, flattenInto, flattenPlan, mergeDown, mergeKind } from './structure';
+import { depthRegion, hasEffects, layerDepths } from './depth';
+import { LayerEffectsPanel, LayerRoleFields } from './LayerDepthPanel';
 import { LayersPanel } from './LayersPanel';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
 import { BLEND_MODES, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
-import { clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
+import { canvasBitmap, clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
   type Matrix, type PixelResult, type PixelSelection, type Rect, type SelectMode, type SelectionResult } from './pixels';
 import { useDocument } from './useDocument';
 import { SHAPES, knifePath, makeShape, roundAllCorners, type CornerStyle } from './vector';
@@ -279,23 +281,49 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     invert: () => { const sel = selectionRef.current; if (sel) settleSelection(invertSelection(sel, selectArea)); },
     clear: () => { const sel = selectionRef.current; if (sel && layer.kind === 'pixel') void editPixels(layer.id, [], current => clearPixels(current, sel)); },
     transform: transformSelected };
+  // ---- Layer depth: merging to pixels, and a mask from the selection. Clips, masks, effects and adjustments draw in depth.ts. ----
+  const layerRole = layerDepths(doc)[doc.layers.findIndex(l => l.id === layer.id)]?.role;
+  /** Merge a layer into the one below: as vectors when both are plain vector layers, otherwise flattened to pixels once queued paint has landed. */
+  const mergeLayerDown = (id: string) => {
+    if (mergeKind(docRef.current, id) === 'vector') { commit(d => mergeDown(d, id)); return; }
+    pixelQueue.current = pixelQueue.current.then(async () => {
+      try {
+        const plan = flattenPlan(docRef.current, id); if (!plan) return;
+        const result = await flattenLayers(plan.render, plan.only);
+        if ('problem' in result) { setNotice(result.problem); return; }
+        flushSync(() => commit(d => flattenInto(d, plan.lowerID, plan.remove, result.bitmap ?? undefined)));
+        setLayerID(plan.lowerID); setSelected([]); setNode(null); setInsideID(null); setNotice('Merged into a pixel layer.');
+      } catch (error) { setNotice(error instanceof Error ? error.message : 'The layers could not be merged.'); }
+    });
+  };
+  /** Hide everything on this layer outside the selection, with a mask layer above it. The layer's own pixels are untouched. */
+  const maskOutsideSelection = async () => {
+    const sel = selectionRef.current; if (!sel || layerRole === 'mask') return;
+    const outside = invertSelection(sel, depthRegion(doc, [layer]) ?? sel.rect);
+    if ('problem' in outside) { setNotice(outside.problem); return; }
+    const pixels = outside.selection && await canvasBitmap(outside.selection.canvas, outside.selection.rect);
+    if (!pixels) { setNotice('The selection already covers everything on this layer.'); return; }
+    const mask: Layer = { ...newPixelLayer(`Mask of ${layer.name}`.slice(0, 200)), role: 'mask', pixels };
+    commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), mask, ...d.layers.slice(at)] }; });
+    setNotice('Everything outside the selection is hidden by a mask layer. Paint or erase on the mask to change what shows; hide or delete it to bring everything back.');
+  };
   const addVector = (paths: DrawingPath[]) => insideID ? changeLayer(l => addInside(l, insideID, paths, crypto.randomUUID())) : splice([], paths);
   /** The Pixel workspace paints pixels and the Vector workspace draws paths, whatever layer is current: when the
    * current layer is the other kind, a layer of the right kind is added above it (Affinity's assistant). Text is always a vector object. */
   /** The pixel layer that paint lands on: the current one; an empty vector layer turned into one, so a new drawing
    * does not start with a spare layer; or a new pixel layer above the current one. */
   const pixelTarget = (): string => {
-    if (layer.kind === 'pixel') return layer.id;
-    if (!layer.paths.length && !layer.groups?.length) { commit(d => ({ ...d, layers: d.layers.map(l => l.id === layer.id ? { ...l, kind: 'pixel' as const } : l) })); return layer.id; }
+    if (layer.kind === 'pixel' && !layer.adjust) return layer.id;
+    if (!layer.adjust && !layer.paths.length && !layer.groups?.length) { commit(d => ({ ...d, layers: d.layers.map(l => l.id === layer.id ? { ...l, kind: 'pixel' as const } : l) })); return layer.id; }
     const created = newPixelLayer(`Layer ${doc.layers.length + 1}`);
     commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), created, ...d.layers.slice(at)] }; });
     setLayerID(created.id); setInsideID(null); setNotice('Painting on a new pixel layer.'); return created.id;
   };
   const add = (paths: DrawingPath[]) => {
     if (workspace === 'pixel' && !paths.some(p => p.text)) { const clip = selectionRef.current; editPixels(pixelTarget(), paths, current => paintPixels(current, paths, 'paint', clip)); return; }
-    if (layer.kind !== 'pixel') { addVector(paths); return; }
+    if (layer.kind !== 'pixel' && !layer.adjust) { addVector(paths); return; }
     // Vector drawing on a pixel layer: an unpainted one becomes a vector layer, otherwise a vector layer is added above it.
-    if (!layer.pixels) { commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return { ...rest, paths }; }) })); return; }
+    if (!layer.pixels && !layer.adjust) { commit(d => ({ ...d, layers: d.layers.map(l => { if (l.id !== layer.id) return l; const { kind: _kind, pixels: _pixels, ...rest } = l; return { ...rest, paths }; }) })); return; }
     const created: Layer = { ...newLayer(`Layer ${doc.layers.length + 1}`), paths };
     commit(d => { const at = Math.max(0, d.layers.findIndex(l => l.id === layer.id)); return { ...d, layers: [...d.layers.slice(0, at), created, ...d.layers.slice(at)] }; });
     setLayerID(created.id); setInsideID(null); setNotice('Drawing on a new vector layer.');
@@ -371,7 +399,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       const data = format.id === 'export' ? new Blob([drawingSVG(doc)], { type: format.mime }) : format.id === 'export-pdf' ? new Blob([drawingPDF(doc) as BlobPart], { type: format.mime })
         : format.id === 'export-ora' ? new Blob([await drawingOpenRaster(doc) as BlobPart], { type: format.mime }) : await rasterBlob(doc, format.mime as 'image/png' | 'image/jpeg' | 'image/webp');
       const url = URL.createObjectURL(data), a = document.createElement('a'); a.href = url; a.download = `${name}.${format.extension}`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(format.id === 'export-pdf' && doc.layers.some(l => l.visible && l.pixels) ? 'Exported as PDF without the pixel layers: PDF export is vector only for now. PNG and OpenRaster include them.'
+      setNotice(format.id === 'export-pdf' && doc.layers.some(l => l.visible && (l.pixels || l.adjust || hasEffects(l.effects))) ? 'Exported as PDF without pixel layers, layer effects or adjustments: PDF export is vector only for now. PNG and OpenRaster include them.'
         : `${doc.infinite ? 'Drawing' : 'Artboard'} exported as ${format.extension.toUpperCase()}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Export failed.'); }
   };
@@ -380,6 +408,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     const format = EXPORTS.find(f => f.id === id); if (format) { void exportAs(format); return; }
     const sample = SAMPLES.find(x => x.id === id); if (sample) { openSample(sample); return; }
     if (id === 'artboard') { commit(d => ({ ...d, infinite: !d.infinite })); return; }
+    if (id === 'select-mask') { void maskOutsideSelection(); return; }
     if (id === 'select-all') { pixelSelect.all(); return; } if (id === 'select-none') { pixelSelect.none(); return; }
     if (id === 'select-invert') { pixelSelect.invert(); return; } if (id === 'select-clear') { pixelSelect.clear(); return; }
     if (id.startsWith('pixel-')) { void turnPixels(id); return; }
@@ -420,7 +449,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     { id: 'rotate-90', label: 'Rotate 90°', category: 'Arrange', disabled: !chosen.length },
     { id: 'group', label: 'Group', category: 'Arrange', disabled: selected.length < 2 }, { id: 'ungroup', label: 'Ungroup', category: 'Arrange' },
     { id: 'select-all', label: 'Select all pixels on this layer', category: 'Select' }, { id: 'select-none', label: 'Deselect pixels', category: 'Select', disabled: !selection },
-    { id: 'select-invert', label: 'Invert pixel selection', category: 'Select', disabled: !selection }, { id: 'select-clear', label: 'Clear selected pixels', category: 'Select', disabled: !selection },
+    { id: 'select-invert', label: 'Invert pixel selection', category: 'Select', disabled: !selection }, { id: 'select-mask', label: 'Mask the layer outside the selection', category: 'Select', disabled: !selection }, { id: 'select-clear', label: 'Clear selected pixels', category: 'Select', disabled: !selection },
     { id: 'fit', label: 'Zoom to fit', category: 'View' }, { id: 'zoom-100', label: 'Zoom to 100%', category: 'View' },
     { id: 'save', label: 'Save drawing', category: 'File' }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, category: 'File' })), ...EXPORTS.map(f => ({ id: f.id, label: f.label, category: 'File' })),
     { id: 'artboard', label: doc.infinite ? 'Use a fixed artboard' : 'Infinite canvas (no artboard)', category: 'View' },
@@ -493,6 +522,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
             { id: 'select-none', label: 'Deselect (Ctrl/Cmd+D)', icon: <AetherIcon name="close-circle" />, disabled: !selection },
             { id: 'select-invert', label: 'Invert selection', icon: <AetherIcon name="contrast" />, disabled: !selection },
             { id: 'select-clear', label: 'Clear selected pixels (Delete)', icon: <AetherIcon name="delete" />, disabled: !selection || layer.kind !== 'pixel' },
+            { id: 'select-mask', label: 'Mask: hide this layer outside the selection', icon: <ToolIcon name="mask" />, disabled: !selection || layerRole === 'mask' },
           ] },
           { id: 'turn', label: 'Flip and rotate', tools: [
             { id: 'pixel-flip-horizontal', label: 'Flip pixels horizontally', icon: <AetherIcon name="flip-horizontal" />, disabled: !layer.pixels },
@@ -526,7 +556,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     ] }}
       tree={{ title: 'Layers', icon: <AetherIcon name="layers" />, content: <LayersPanel pixel={workspace === 'pixel'} doc={doc} layer={layer} selected={selected} boardSelection={boardSelection} onSelectBoard={selectBoard}
         onDeleteBoard={ids => { changeBoard(board.filter(i => !ids.includes(i.id) && !(i.kind === 'connector' && (ids.includes(i.from ?? '') || ids.includes(i.to ?? ''))))); setBoardSelection([]); }}
-        onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} /> }}
+        onSelect={(id, ids) => { if (id !== layer.id) setInsideID(null); setLayerID(id); setSelected(ids); setNode(null); }} commit={commit} onMergeDown={mergeLayerDown} /> }}
       advisor={<WorkspaceAgent service={studioAgentService} app="sketch" interaction={agentInteraction} contextText={`Drawing ${name}. Use inspect to read the open drawing and its current layer/shape IDs.`} detail={name} messages={agentMessages} onMessages={setAgentMessages}/>}
       connection={documentConnection} historyTabStorageKey="aether-sketch.history-tab" history={<SketchHistoryPanel history={{...history, goTo: index => { setEpoch(e => e + 1); history.goTo(index); setSelected([]); setNode(null); setInsideID(null); }}} writable={persistence.file?.writable !== false}/>}
       files={{ local: { label: 'This drawing', icon: <AetherIcon name="file-sketch" />, content: <DocumentTabBrowser title="Drawing contents" rootLabel={`${name}.aethersketch`} label="Drawing"
@@ -564,14 +594,15 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           <FieldRow label="Opacity"><Slider min={0} max={100} unit="%" value={Math.round((layer.opacity ?? 1) * 100)} disabled={layer.locked} ariaLabel="Layer opacity"
             onChange={value => changeLayer(l => ({ ...l, opacity: value / 100 }))} /></FieldRow>
           <FieldRow label="Blend"><SelectField aria-label="Layer blend mode" value={layer.blend ?? 'normal'} disabled={layer.locked} options={BLEND_MODES.map(value => ({ value, label: value.replace('-', ' ') }))}
-            onChange={event => { const blend = event.target.value as BlendMode; changeLayer(l => ({ ...l, blend: blend === 'normal' ? undefined : blend })); }} /></FieldRow></div></div>,
+            onChange={event => { const blend = event.target.value as BlendMode; changeLayer(l => ({ ...l, blend: blend === 'normal' ? undefined : blend })); }} /></FieldRow>
+          <LayerRoleFields layer={layer} role={layerRole} hasBelow={doc.layers.at(-1)?.id !== layer.id} onChange={changeLayer} /></div></div>,
         appearance: <div className="sketch-properties"><ColourPanel value={paint.color} recent={recentColours} onPick={pickColour} /><VectorPaintPanel value={chosen[0] ? copyPaint(chosen[0]) : paint} disabled={disabled} selected={chosen.length === 1 ? chosen[0] : undefined}
             inside={!!insideID} onInside={() => { setInsideID(insideID ? null : chosen[0]?.id ?? null); chooseTool('paint'); }}
             onChange={patch => { setPaint(p => ({ ...p, ...patch })); setStyle(patch); }}
             canRelease={chosen.some(p => ancestors(layer, p.groupID).some(g => g.clipPathID))}
             onRelease={() => { const ids = new Set(chosen.flatMap(p => ancestors(layer, p.groupID).filter(g => g.clipPathID).map(g => g.id))); changeLayer(l => ({ ...l, groups: l.groups?.map(g => ids.has(g.id) ? { ...g, clipPathID: undefined } : g) })); setInsideID(null); }} /></div>,
         transform: <div className="sketch-properties"><VectorInspector contour={contour} paths={chosen} node={node} disabled={disabled} onReplace={replace} onSplice={splice} onAdd={add} onDuplicate={() => { const next = duplicatePaintSelection(layer, selected); changeLayer(() => next.layer); setSelected(next.selected); }} onSelect={select} snap={snap} onSnap={setSnap} /></div>,
-        effects: <div className="sketch-properties"><RegionInspector paths={chosen} disabled={disabled} onSplice={splice} onSelect={select} contour={contour} onContour={index=>{setContour(index);setNode(null);chooseTool('node');}} /></div>,
+        effects: <div className="sketch-properties"><RegionInspector paths={chosen} disabled={disabled} onSplice={splice} onSelect={select} contour={contour} onContour={index=>{setContour(index);setNode(null);chooseTool('node');}} /><LayerEffectsPanel layer={layer} onChange={changeLayer} /></div>,
       }}
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
