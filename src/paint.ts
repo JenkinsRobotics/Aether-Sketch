@@ -30,6 +30,11 @@ export function clipPaths(layer: Layer, path: DrawingPath): DrawingPath[] {
 }
 /** Keep references valid after deletion, ungrouping, opening or moving a boundary. */
 export function repairClips(doc: SketchDocument): SketchDocument {
+  // A flipbook frame whose layer is gone (deleted, merged away) leaves the flipbook; a flipbook with no frames is no flipbook.
+  if (doc.flipbook && doc.flipbook.frames.some(id => !doc.layers.some(l => l.id === id))) {
+    const frames = doc.flipbook.frames.filter(id => doc.layers.some(l => l.id === id)), { flipbook: book, ...rest } = doc;
+    doc = frames.length ? { ...rest, flipbook: { ...book, frames } } : rest;
+  }
   return { ...doc, layers: doc.layers.map(l => ({ ...l, groups: l.groups?.map(g =>
     g.clipPathID && !l.paths.some(p => p.id === g.clipPathID && p.closed && !p.text && !p.symbolID && p.groupID === g.id)
       ? { ...g, clipPathID: undefined } : g) })) };

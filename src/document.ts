@@ -29,7 +29,9 @@ export const isGeometry = (p: DrawingPath) => !p.text && !p.symbolID;
 /** A page of the drawing: a named frame that exports are cut to. Every artboard shows the same layers. */
 export interface Artboard { id: string; name: string; x: number; y: number; width: number; height: number }
 /** `artboards` lists the pages when there are several, or one that is not at the origin; `widthPx` and `heightPx` stay the first one's size. */
-export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean; artboards?: Artboard[]; symbols?: SymbolDef[] }
+export interface SketchDocument { format: 'aethersketch'; version: 2; widthPx: number; heightPx: number; layers: Layer[]; board?: BoardItem[]; infinite?: boolean; artboards?: Artboard[]; symbols?: SymbolDef[]; flipbook?: Flipbook }
+/** A flipbook: the listed layers are its frames, in order, and only one of them shows at a time. Every other layer is in every frame. */
+export interface Flipbook { fps: number; frames: string[] }
 /** The drawing's artboards: none on an infinite canvas; otherwise the listed ones, or for a drawing without a list the one page at the origin. */
 export function docArtboards(doc: SketchDocument): Artboard[] {
   return doc.infinite ? [] : doc.artboards?.length ? doc.artboards : [{ id: 'artboard', name: 'Artboard 1', x: 0, y: 0, width: doc.widthPx, height: doc.heightPx }];
@@ -148,6 +150,11 @@ export function readDocument(text: string): SketchDocument {
       const clip = layer.paths.find((p: DrawingPath) => p.id === group.clipPathID);
       check(clip?.closed && !clip.text && !clip.symbolID && clip.groupID === group.id);
     }
+  }
+  if (doc.flipbook !== undefined) {
+    const book = doc.flipbook, layerIDs = new Set(doc.layers.map((l: Layer) => l.id));
+    check(book && typeof book === 'object' && number(book.fps, 1, 60) && Array.isArray(book.frames) && book.frames.length >= 1 && book.frames.length <= 2000);
+    check(new Set(book.frames).size === book.frames.length && book.frames.every((frame: unknown) => typeof frame === 'string' && layerIDs.has(frame)));
   }
   const board = readBoard(doc.board, ids), { board: _raw, ...rest } = doc;
   return { ...rest, version: 2, ...(board.length ? { board } : {}) };

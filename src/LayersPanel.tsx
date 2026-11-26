@@ -87,7 +87,8 @@ export function LayersPanel({ doc, layer, selected, onSelect, commit, boardSelec
     return rank(b.id) - rank(a.id);
   });
   const depths = layerDepths(doc), roleOf = (l: Layer) => depths[doc.layers.indexOf(l)]?.role;
-  const kindLabel = (l: Layer) => [roleOf(l), l.adjust ? 'adjust' : ''].filter(Boolean).join(' · ');
+  const frameOf = (l: Layer) => (doc.flipbook?.frames.indexOf(l.id) ?? -1) + 1;
+  const kindLabel = (l: Layer) => [frameOf(l) ? `frame ${frameOf(l)}` : '', roleOf(l), l.adjust ? 'adjust' : ''].filter(Boolean).join(' · ');
   const nodes: TreeNode[] = doc.layers.map(l => ({ id: l.id, label: l.name, dimmed: !l.visible, icon: roleOf(l) === 'mask' ? <ToolIcon name="mask" /> : <AetherIcon name={l.adjust ? 'sliders' : l.kind === 'pixel' ? 'image' : 'layers'} />,
     badge: [kindLabel(l), l.kind === 'pixel' ? 'px' : l.adjust && !l.paths.length ? '' : String(l.paths.length)].filter(Boolean).join(' · '), actions: actions(l.name, l.visible, l.locked), children: children(l) }));
   // Board items draw above every layer, so their section leads the tree, newest first.

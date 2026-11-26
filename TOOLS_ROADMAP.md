@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.29)
+## Where it stands (alpha-0.1.30)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -22,7 +22,7 @@ and eyedropper follow the current layer's kind.
 
 | | Pixel | Vector |
 |---|---|---|
-| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse and French curve guides, symmetry (mirror, flip, quad, radial), 1-, 2- and 3-point and fisheye perspective, isometric grid, steady stroke, predictive stroke, canvas rotation | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
+| Works today | Pixel layers; stamped brushes painted live under the pen, with size, opacity, flow, spacing, softness and paper grain; 14 presets including pencils, inks, markers, charcoal, chalk, crayon and airbrushes; smudge; pencil, shapes and pen land as pixels; pixel eraser; flood fill with tolerance; eyedropper; pixel selections (rectangle, ellipse, freehand, polygon, magic wand; add, subtract, intersect, invert) that painting, erasing, filling and smudging stay inside; move, scale, rotate, skew, flip and copy the selected pixels; colour wheel and palette; layer opacity and blend modes; clipping layers, mask layers, a mask from the selection, layer blur, shadow and glow, adjustment layers, merge down; ruler, ellipse and French curve guides, symmetry (mirror, flip, quad, radial), 1-, 2- and 3-point and fisheye perspective, isometric grid, steady stroke, predictive stroke, canvas rotation, flipbook animation, time-lapse recording | Pen (corners and curves, closes on its start), line, pencil, vector brush, rectangle, ellipse, polygon, star, a shape library (13 shapes, each with one option), text in a box and text on a path, select, node editing, corner tool (round or chamfer), lasso select, trim, knife, Booleans and Divide, gradients, stroke caps, joins, named and custom dashes, arrowheads, line width profiles, draw inside, align, distribute, order, flip, rotate, groups, snapping |
 | Known gap | No pen tilt, no wet or mixing brushes (Fresco's live brushes), and the eraser is hard-edged. Selections have no feather, no cut, copy and paste between layers, and no four-corner (perspective) distort. | No drag-to-merge shape builder (Divide then Union does the same job in two steps) and no width profile drawn from pen pressure (four preset profiles, open paths only). Rounded corners and library shapes become plain nodes rather than staying live; the knife cuts straight lines only. |
 
 Pixel layer limits in this release:
@@ -115,8 +115,20 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
    Left for later: dragging and resizing artboards on the canvas, artboard size
    presets, nested symbols, a symbol library shared between drawings, PSD layer
    masks and groups, 16-bit and CMYK PSD.
-8. **Motion.** Flipbook frames and time-lapse recording. Last, because nothing
-   else depends on it.
+8. **Motion.** Done in alpha-0.1.30:
+   - **Flipbook.** The Flipbook toggle in the guide tray makes the current layer
+     frame 1 and opens a timeline at the bottom. Frames are layers shown one at a
+     time; every other layer is in every frame. Add, duplicate and delete frames,
+     step and play at 1–60 frames a second, and onion skin ghosts the frames
+     before and after. Export as an animated PNG, a video, or PNG frames in a
+     ZIP; ordinary exports give the frame in hand.
+   - **Time-lapse.** Record a time-lapse keeps a small picture after each change;
+     stopping saves them as a video framed on the finished drawing.
+   Left for later: several layers per frame, holding a frame for more than one
+   step, frame thumbnails in the timeline, GIF export, and a time-lapse that is
+   kept in the file (it lasts only while the drawing stays open, and thins itself
+   past 1500 steps). Video is recorded by the browser in real time: WebM in
+   Chrome and Firefox, MP4 in Safari.
 
 Each step ships as its own alpha release, live on the Studio host, with a test
 and a walk of the changed flow.

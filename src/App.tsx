@@ -43,8 +43,11 @@ import { LayerEffectsPanel, LayerRoleFields } from './LayerDepthPanel';
 import { LayersPanel } from './LayersPanel';
 import { ArtboardPanel } from './ArtboardPanel';
 import { SymbolPanel } from './SymbolPanel';
+import { FlipbookPanel } from './FlipbookPanel';
+import { addFrame, animatedPNG, canvasVideo, endFlipbook, frameDoc, placeFrame, thinFrames, videoSize, type LapseFrame } from './motion';
+import { duplicateLayer } from './structure';
 import { groupSelection, ungroupSelection, pathLocked, pathVisible } from './structure';
-import { BLEND_MODES, docArtboards, isGeometry, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap } from './document';
+import { BLEND_MODES, docArtboards, isGeometry, readDocument, serializeDocument, newDocument, newLayer, newPixelLayer, type BlendMode, type DrawingPath, type Layer, type PixelBitmap, type SketchDocument } from './document';
 import { canvasBitmap, clearPixels, compositePixels, fillPixels, invertSelection, paintPixels, paintedBounds, pixelBounds, rectSelection, samplePixel, shapeSelection, transformPixels, transformSelection, unionRect, wandSelection,
   type Matrix, type PixelResult, type PixelSelection, type Rect, type SelectMode, type SelectionResult } from './pixels';
 import { useDocument } from './useDocument';
@@ -408,8 +411,77 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const download = (text: string, filename: string, mime: string) => {
     const url = URL.createObjectURL(new Blob([text], { type: mime })), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
+  // ---- Motion: a flipbook's frames are layers shown one at a time; a time-lapse is a picture kept after each change. ----
+  const book = doc.flipbook, [flipOpen, setFlipOpen] = useState(false), [frameAt, setFrameAt] = useState(0), [playAt, setPlayAt] = useState<number | null>(null), [onion, setOnion] = useState(true), [motionBusy, setMotionBusy] = useState(false);
+  // The frame in hand is the current layer's when that layer is a frame, else the one last picked on the timeline.
+  const ownFrame = book ? book.frames.indexOf(layer.id) : -1, frame = book ? (ownFrame >= 0 ? ownFrame : Math.min(frameAt, book.frames.length - 1)) : 0;
+  useEffect(() => { if (ownFrame >= 0) setFrameAt(ownFrame); }, [ownFrame]);
+  /** The drawing as it is seen and exported: the frame in hand, without ghosts. */
+  const still = useMemo(() => book ? frameDoc(doc, frame) : doc, [doc, book, frame]);
+  /** The drawing on the canvas: the playing frame, or the frame in hand with its neighbours ghosted. */
+  const shownDoc = useMemo(() => !book ? doc : playAt !== null ? frameDoc(doc, playAt) : frameDoc(doc, frame, onion), [doc, book, frame, playAt, onion]);
+  useEffect(() => { if (playAt === null || !book) return; const timer = window.setInterval(() => setPlayAt(i => i === null ? null : (i + 1) % book.frames.length), 1000 / book.fps); return () => window.clearInterval(timer); }, [playAt === null, book?.fps, book?.frames.length]);
+  const seekFrame = (index: number) => { if (!book) return; const at = Math.min(book.frames.length - 1, Math.max(0, index)); setPlayAt(null); setFrameAt(at); setLayerID(book.frames[at]); setSelected([]); setNode(null); setInsideID(null); };
+  const saveBlob = (blob: Blob, filename: string) => { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); };
+  const frameCommand = async (id: string) => {
+    if (id === 'flipbook') { if (!book) { commit(d => addFrame(d, layer)); setFlipOpen(true); setNotice('Flipbook started: this layer is frame 1. Add frames in the timeline; other layers show in every frame.'); } else setFlipOpen(open => !open); return; }
+    if (!book) return;
+    if (id === 'flipbook-end') { commit(endFlipbook); setFlipOpen(false); setPlayAt(null); return; }
+    if (id === 'frame-add' || id === 'frame-duplicate') {
+      // A new frame is a new layer above this frame's layer: empty, or a copy to change a little.
+      const source = book.frames[frame], at = doc.layers.findIndex(l => l.id === source), copied = id === 'frame-duplicate' ? duplicateLayer(doc, source) : doc;
+      const added: Layer = id === 'frame-duplicate' ? { ...copied.layers[at], name: `Frame ${book.frames.length + 1}` } : (workspace === 'pixel' ? newPixelLayer : newLayer)(`Frame ${book.frames.length + 1}`);
+      const next = addFrame(id === 'frame-duplicate' ? { ...copied, layers: copied.layers.map((l, i) => i === at ? added : l) } : copied, added, frame);
+      commit(() => next); setPlayAt(null); setFrameAt(frame + 1); setLayerID(added.id); setSelected([]); setNode(null); return;
+    }
+    if (id === 'frame-remove') { if (book.frames.length < 2) return; const gone = book.frames[frame], stay = book.frames[frame > 0 ? frame - 1 : 1]; commit(d => ({ ...d, layers: d.layers.filter(l => l.id !== gone) })); setLayerID(stay); setFrameAt(Math.max(0, frame - 1)); setSelected([]); return; }
+    // Exports: every frame as a picture of the current artboard (or of everything drawn in any frame).
+    setMotionBusy(true); setPlayAt(null);
+    try {
+      const all: SketchDocument = { ...doc, layers: doc.layers.map(l => book.frames.includes(l.id) ? { ...l, visible: true } : l) }, area = exportArea(all, currentArtboard?.id);
+      setNotice(`Rendering ${book.frames.length} frames…`);
+      const frames: Uint8Array[] = []; for (let i = 0; i < book.frames.length; i++) frames.push(new Uint8Array(await (await rasterBlob(frameDoc(doc, i), 'image/png', area, 1280)).arrayBuffer()));
+      if (id === 'flipbook-apng') saveBlob(new Blob([animatedPNG(frames, book.fps) as BlobPart], { type: 'image/apng' }), `${name} flipbook.png`);
+      else if (id === 'flipbook-frames') saveBlob(new Blob([storedZip(frames.map((data, i) => ({ name: `frame-${String(i + 1).padStart(3, '0')}.png`, data }))) as BlobPart], { type: 'application/zip' }), `${name} frames.zip`);
+      else {
+        // Three times through, on a white page, so a short flipbook is long enough to watch.
+        const size = videoSize(area), images = await Promise.all(frames.map(data => createImageBitmap(new Blob([data as BlobPart], { type: 'image/png' }))));
+        const video = await canvasVideo(size.width, size.height, book.fps, images.length * 3, (context, i) => { context.fillStyle = '#ffffff'; context.fillRect(0, 0, size.width, size.height); context.drawImage(images[i % images.length], 0, 0, size.width, size.height); });
+        saveBlob(video, `${name} flipbook.${video.type.includes('mp4') ? 'mp4' : 'webm'}`);
+      }
+      setNotice(`Flipbook exported: ${book.frames.length} frames at ${book.fps} a second.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'The flipbook could not be exported.'); }
+    setMotionBusy(false);
+  };
+  // Time-lapse: while recording, each change leaves a small picture in memory. Stopping saves them as a video.
+  // ponytail: kept in memory for this visit only (not in the file), thinned past 1500 pictures; store them in the file if a time-lapse must survive closing the drawing.
+  const [recording, setRecording] = useState(false), lapse = useRef<{ frames: LapseFrame[]; busy: boolean; next: SketchDocument | null }>({ frames: [], busy: false, next: null });
+  const capture = (d: SketchDocument, artboardID?: string) => {
+    const r = lapse.current; if (r.busy) { r.next = d; return; } // while one picture renders, only the newest state waits
+    r.busy = true; const area = exportArea(d, artboardID);
+    rasterBlob(d, 'image/jpeg', area, 960).then(blob => { r.frames = thinFrames([...r.frames, { blob, area }]); }).catch(() => {}).finally(() => { r.busy = false; const next = r.next; r.next = null; if (next) capture(next, artboardID); });
+  };
+  useEffect(() => { if (recording) capture(still, currentArtboard?.id); }, [recording, still]);
+  const toggleLapse = async () => {
+    if (!recording) { lapse.current = { frames: [], busy: false, next: null }; setRecording(true); setNotice('Recording a time-lapse: every change is a step. Choose it again to stop and save the video.'); return; }
+    setRecording(false);
+    for (let wait = 0; (lapse.current.busy || lapse.current.next) && wait < 100; wait++) await new Promise(resolve => setTimeout(resolve, 50));
+    const frames = lapse.current.frames; lapse.current = { frames: [], busy: false, next: null };
+    if (frames.length < 2) { setNotice('Nothing changed while recording, so there is no time-lapse to save.'); return; }
+    setNotice(`Saving a time-lapse of ${frames.length} steps. This takes about ${Math.ceil(frames.length / 24) + 2} seconds…`);
+    try {
+      // Framed on the finished drawing; earlier, smaller pictures sit where their part of it is.
+      const final = frames[frames.length - 1].area, size = videoSize(final);
+      const video = await canvasVideo(size.width, size.height, 24, frames.length, async (context, i) => {
+        const image = await createImageBitmap(frames[i].blob), at = placeFrame(frames[i].area, final, size);
+        context.fillStyle = '#ffffff'; context.fillRect(0, 0, size.width, size.height); context.drawImage(image, at.x, at.y, at.width, at.height); image.close();
+      });
+      saveBlob(video, `${name} time-lapse.${video.type.includes('mp4') ? 'mp4' : 'webm'}`); setNotice(`Time-lapse saved: ${frames.length} steps.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'The time-lapse could not be saved.'); }
+  };
   /** Open formats only: SVG (Inkscape layers), PDF, PNG, JPEG, WebP and OpenRaster (GIMP, Krita). */
   const exportAs = async (format: typeof EXPORTS[number]) => {
+    const doc = still; // a flipbook exports the frame in hand
     try {
       // Images and SVG frame the current artboard; PDF has a page for each one.
       const area = exportArea(doc, currentArtboard?.id), bytes = async (blob: Blob) => new Uint8Array(await blob.arrayBuffer());
@@ -436,6 +508,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
     if (id.startsWith('pixel-')) { void turnPixels(id); return; }
     if (id in TOOL_INFO || boardTools.some(t => t.id === id)) { chooseTool(id as AppTool); return; }
     if (id.startsWith('guide-')) { toggleGuide(id.slice(6)); return; }
+    if (id === 'flipbook' || id.startsWith('flipbook-') || id.startsWith('frame-')) { void frameCommand(id); return; }
+    if (id === 'timelapse') { void toggleLapse(); return; }
     if (id === 'image') { imageFile.current?.click(); return; }
     if (id === 'fit') { canvasController.current?.fit(); return; }
     if (id === 'zoom-100') { canvasController.current?.zoomTo(1); return; }
@@ -461,6 +535,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
   const searchCommands = [
     ...DRAW_TOOLS.map(id => ({ id, label: TOOL_INFO[id].label, category: 'Tools', icon: TOOL_INFO[id].icon })),
     ...GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, category: 'Guides', icon: g.icon })),
+    { id: 'flipbook', label: book ? 'Show or hide the flipbook timeline' : 'Start a flipbook', category: 'Motion' }, { id: 'timelapse', label: recording ? 'Stop and save the time-lapse' : 'Record a time-lapse', category: 'Motion' },
     ...boardTools.map(t => ({ id: t.id, label: t.label, category: 'Board', icon: t.icon })),
     { id: 'image', label: 'Add image or file…', category: 'Board' },
     ...ALIGN.map(a => ({ id: `align-${a.id}`, label: a.label, category: 'Arrange', disabled: !chosen.length })),
@@ -541,6 +616,9 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       documentState={<span className="sketch-recovery-status" data-recovery-status="" role="status">{[saveState, recoveryStatus, notice].filter(Boolean).join(' · ')}</span>}
       headerTrailing={<DraftRecovery scope={recoveryKey} onRestore={draft=>{void beginDocument(()=>{history.open(draft.doc);setName(draft.name);setLayerID(draft.doc.layers[0].id);setSelected([]);setInsideID(null);setContour(0);setEpoch(e=>e+1);}).catch(e=>setNotice(e.message));}}/>}
       commands={searchCommands} onCommand={runCommand} layout={preset} onLayoutChange={setPreset}
+      bottom={book && flipOpen ? <FlipbookPanel book={book} index={playAt ?? frame} frameName={doc.layers.find(l => l.id === book.frames[playAt ?? frame])?.name ?? ''} playing={playAt !== null} onion={onion} busy={motionBusy}
+        onSeek={seekFrame} onPlay={() => setPlayAt(at => at === null ? frame : null)} onFps={fps => commit(d => d.flipbook ? { ...d, flipbook: { ...d.flipbook, fps: Math.min(60, Math.max(1, Math.round(fps))) } } : d)} onOnion={() => setOnion(v => !v)}
+        onAdd={() => void frameCommand('frame-add')} onDuplicate={() => void frameCommand('frame-duplicate')} onRemove={() => void frameCommand('frame-remove')} onCommand={id => void frameCommand(id)} /> : undefined}
       panelState={panelState} onPanelStateChange={state => { setPanelState(state); try { sessionStorage.setItem(PANELS_KEY, JSON.stringify(state)); } catch { /* layout is a convenience */ } }}
       sidebarSizing={{ width: 260, minWidth: 216, maxWidth: 480, minCenterWidth: 240 }}
       toolbar={{ workspaces: (Object.keys(WORKSPACES) as Workspace[]).map(id => ({ id, label: WORKSPACES[id].label, icon: WORKSPACES[id].icon })), workspaceID: workspace,
@@ -639,7 +717,8 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
       }}
       centerTray={{ onAction: runCommand,
         tools: [{ id: 'undo', label: 'Undo', icon: <AetherIcon name="undo" />, disabled: !history.canUndo }, { id: 'redo', label: 'Redo', icon: <AetherIcon name="redo" />, disabled: !history.canRedo }],
-        toggles: GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, icon: g.icon, pressed: g.id === 'steady' ? guides.steady !== undefined : !!guides[g.id] })),
+        toggles: [...GUIDES.map(g => ({ id: `guide-${g.id}`, label: g.label, icon: g.icon, pressed: g.id === 'steady' ? guides.steady !== undefined : !!guides[g.id] })),
+          { id: 'flipbook', label: 'Flipbook', icon: <AetherIcon name="film" />, pressed: !!book && flipOpen }, { id: 'timelapse', label: recording ? 'Stop and save the time-lapse' : 'Record a time-lapse', icon: <AetherIcon name="record" />, pressed: recording }],
         windowCommands: [{ id: 'open', label: 'Open drawing…', icon: <AetherIcon name="open" /> }, ...SAMPLES.map(x => ({ id: x.id, label: x.label, icon: <AetherIcon name="sparkles" /> })), { id: 'import', label: 'Import SVG or PSD…', icon: <AetherIcon name="import" /> },
           { id: 'image', label: 'Add image or file…', icon: <AetherIcon name="image" /> }, ...EXPORTS.map(f => ({ id: f.id, label: f.label, icon: <AetherIcon name="export" /> }))] }}
       environment={{ onSelect: id => { if (id === 'grid') setBoardGrid(v => !v); else if (id === 'connectors') setBoardConnectors(v => !v); else if (id === 'snap') setSnap(s => ({ ...s, enabled: !s.enabled })); else runCommand(id); },
@@ -657,7 +736,7 @@ export default function App({ initial, recoveryKey }: { initial?: Recovery; reco
           tool={isBoardTool(tool) ? CANVAS_TOOL[tool] : tool === 'select' || tool === 'hand' || tool === 'zoom' ? tool : `vector:${tool}`} hostTools={HOST_TOOLS}
           onToolChange={next => { if (next === 'select') chooseTool('select'); }} onAttachFiles={files => void attach(files, screenToWorld(camera, { x: 160, y: 160 }))}
           contentBounds={contentBounds} createId={() => crypto.randomUUID()}
-          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={doc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides} artboardID={currentArtboard?.id}
+          layer={<SketchCanvas contour={contour} resetKey={`${layer.id}:${tool}:${epoch}`} doc={shownDoc} layer={layer} tool={isBoardTool(tool) ? 'select' : tool} onTool={chooseTool} paint={paint} polygonSides={sides} brush={brush} drawGuides={guides} onDrawGuides={setGuides} artboardID={currentArtboard?.id}
         selected={selected} onSelect={select} node={node} onNode={setNode} snap={snap} onAdd={path => add(guides.symmetry ? [path, ...symmetryCopies(path, guides.symmetry).map(copy => ({ ...copy, id: crypto.randomUUID() }))] : [path])} onSplice={splice}
         makeShape={box => makeShape(shapeKind.id, box, shapeAmount)} cornerStyle={corner.style} onKnife={knife} select={pixelSelect} pending={pending} onErasePixels={erasePixels} onPixelPoint={pixelPoint} joinPaths={workspace === 'vector'} pixelBrush={workspace === 'pixel'} onPaintStroke={paintStroke}
         openPixels={() => pixelQueue.current.then(() => docRef.current.layers.find(l => l.id === layer.id)?.pixels)} onSmudged={(layerID, stroke) => editPixels(layerID, [], async () => ({ bitmap: await stroke.encode() }))}
