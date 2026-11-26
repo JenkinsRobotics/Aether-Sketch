@@ -26,3 +26,13 @@ it('changing document, editing during rendering, and cancellation discard stale 
     finish(preview);await expect(pending).rejects.toThrow();expect(input.commit).not.toHaveBeenCalled();unmount();
   }
 });
+it('a layer tool commits one validated drawing and makes that layer current; a read-only drawing refuses it',async()=>{
+  const input={...state(),writable:true},{result}=renderHook(()=>useAgentInteraction(input)),layer_id=input.doc.layers[0].id;
+  const done=await result.current.execute({id:'set',name:'aether_sketch_set_layer',arguments:{layer_id,opacity:.4,blend:'screen'}},new AbortController().signal);
+  expect(input.commit).toHaveBeenCalledTimes(1);expect(input.select).toHaveBeenCalledWith(layer_id,[]);expect(done).toMatchObject({changed:true,layer_id});
+  expect(vi.mocked(input.commit).mock.calls[0][0](input.doc).layers[0]).toMatchObject({opacity:.4,blend:'screen'});
+  const locked=state(),{result:readOnly}=renderHook(()=>useAgentInteraction(locked));
+  await expect(readOnly.current.execute({id:'set',name:'aether_sketch_set_layer',arguments:{layer_id:locked.doc.layers[0].id,opacity:.4}},new AbortController().signal)).rejects.toThrow('read-only');
+  expect(locked.commit).not.toHaveBeenCalled();
+  expect(result.current.tools.map(t=>t.name)).toEqual(expect.arrayContaining(['aether_sketch_set_layer','aether_sketch_move_layer','aether_sketch_duplicate_layer','aether_sketch_delete_layer']));
+});

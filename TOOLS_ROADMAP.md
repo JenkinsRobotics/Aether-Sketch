@@ -9,7 +9,7 @@ Reference apps: **Autodesk SketchBook** and **Adobe Fresco** for the Pixel
 workspace, **Affinity Designer** for the Vector workspace. We match their tools
 and behaviour; we do not copy their artwork, names or file formats.
 
-## Where it stands (alpha-0.1.30)
+## Where it stands (alpha-0.1.31)
 
 The workspace selector in the tool bar switches between Pixel and Vector.
 `?workspace=vector` opens straight into Vector.
@@ -132,6 +132,16 @@ Lines and pen paths join at free ends and close on their own start (alpha-0.1.18
 
 Each step ships as its own alpha release, live on the Studio host, with a test
 and a walk of the changed flow.
+
+## The AI agent
+
+The agent draws, styles, transforms and deletes vector shapes, and since
+alpha-0.1.31 works with layers as a person does: `set_layer` (name, visibility,
+lock, opacity, blend mode, clip or mask role, blur, shadow, glow, adjustment),
+`move_layer`, `duplicate_layer`, `delete_layer`, and `add_layer` above a chosen
+layer; `inspect` lists every layer's settings. Not yet available to the agent:
+painting pixels, pixel selections, merging layers, artboards, symbols, guides,
+flipbook frames and exports.
 
 ## Open decisions
 
